@@ -1,0 +1,27 @@
+11Dog DN11 网络测速平台已成功部署！
+
+1. 获取 Web UI 与管理后台地址:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  测速前台: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}
+  管理后台: http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}/admin
+{{- end }}
+{{- else }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "11dog.fullname" . }} 8080:{{ .Values.service.httpPort }}
+  测速前台: http://127.0.0.1:8080
+  管理后台: http://127.0.0.1:8080/admin
+{{- end }}
+
+2. 节点接入步骤:
+  登录 /admin 后台 -> 点击「+ 新增节点」-> 复制服务端托管的一键安装脚本:
+  curl -fsSL "<你的Web地址>/scripts/install.sh?token=<数据库签发Token>&grpc=<gRPC地址>" | sudo bash
+
+  gRPC 反连入口:
+{{- if .Values.grpcIngress.enabled }}
+  {{ .Values.grpcIngress.host }}:443 (TLS)
+{{- else if .Values.service.grpcExternal.enabled }}
+  {{ include "11dog.fullname" . }}-grpc ({{ .Values.service.grpcExternal.type }}:{{ .Values.service.grpcExternal.port }})
+{{- else }}
+  {{ include "11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.grpcPort }}
+  (如需集群外 DN11 节点接入，请开启 service.grpcExternal.enabled=true 或 grpcIngress.enabled=true)
+{{- end }}

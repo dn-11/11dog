@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "11dog.fullname" . }}
+  labels:
+    {{- include "11dog.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "11dog.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.auth.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "11dog.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq .Values.db.driver "sqlite") .Values.db.sqlite.persistence.enabled }}
+      securityContext:
+        fsGroup: 10001
+      {{- end }}
+      containers:
+        - name: 11dog-server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/11dog/server.yaml
+          env:
+            - name: DOG_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "11dog.secretName" . }}
+                  key: admin-token
+            {{- if .Values.db.existingSecret }}
+            - name: DOG_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.db.existingSecret }}
+                  key: db-dsn
+            {{- else if and (ne .Values.db.driver "sqlite") .Values.db.dsn }}
+            - name: DOG_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "11dog.secretName" . }}
+                  key: db-dsn
+                  optional: true
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/11dog/server.yaml
+              subPath: server.yaml
+              readOnly: true
+            {{- if and (eq .Values.db.driver "sqlite") .Values.db.sqlite.persistence.enabled }}
+            - name: sqlite-data
+              mountPath: /var/lib/11dog
+            {{- end }}
+            {{- if and .Values.tls.enabled .Values.tls.secretName }}
+            - name: grpc-tls
+              mountPath: /etc/11dog/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "11dog.fullname" . }}-config
+        {{- if and (eq .Values.db.driver "sqlite") .Values.db.sqlite.persistence.enabled }}
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: {{ include "11dog.fullname" . }}-data
+        {{- end }}
+        {{- if and .Values.tls.enabled .Values.tls.secretName }}
+        - name: grpc-tls
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

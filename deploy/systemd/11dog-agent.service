@@ -1,0 +1,32 @@
+[Unit]
+Description=11Dog DN11 Network Probe Agent
+Documentation=https://github.com/11dog/11dog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=11dog
+Group=11dog
+ExecStart=/usr/local/bin/11dog-agent --config /etc/11dog/agent.yaml
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=0
+
+# Grant raw socket capability for ICMP Ping & Traceroute without running as root
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# Systemd sandboxing & hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadOnlyPaths=/etc/11dog
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

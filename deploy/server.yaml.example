@@ -1,0 +1,51 @@
+http_listen_addr: ":8080"
+grpc_listen_addr: ":9090"
+# 对外展示的反连 gRPC 地址（留空则根据浏览器访问域名自动拼接 :9090）
+public_grpc_addr: ""
+# 托管供 /scripts/install.sh 下载的 Agent 二进制目录
+agent_bin_dir: "./bin"
+agent_download_base_url: ""
+
+site_title: "11Dog - DN11 网络测速平台"
+network_name: "DN11"
+
+tls:
+  enabled: false
+  cert_file: ""
+  key_file: ""
+
+auth:
+  admin_token: "change-me-dn11-admin-token"
+
+db:
+  # sqlite (单机轻量内置纯 Go) 或 postgres (多副本高可用)
+  driver: "sqlite"
+  dsn: "./data/11dog.db"
+
+mq:
+  driver: "memory" # memory | nats
+  nats_url: "nats://127.0.0.1:4222"
+  stream_name: "DOG_TASKS"
+  max_queue_per_node: 20
+  task_ttl_sec: 60
+
+limits:
+  rate_limit_rpm: 180
+  rate_limit_burst: 30
+  max_target_len: 512
+  default_timeout_ms: 15000
+  max_timeout_ms: 60000
+  per_node_dispatch_rps: 10
+  task_history_ttl_sec: 1800
+  allowed_cidrs: []
+  denied_cidrs: []
+
+dn11_prefixes:
+  - cidr: "172.16.0.0/16"
+    asn: 4211110000
+    owner: "DN11 Backbone"
+    region: "DN11"
+  - cidr: "fd00::/48"
+    asn: 4211110000
+    owner: "DN11 IPv6 Backbone"
+    region: "DN11"

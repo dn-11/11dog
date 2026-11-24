@@ -1,0 +1,271 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/11dog/11dog/gen/agent/v1;agentv1";
+
+service AgentHub {
+  // Reverse gRPC bi-directional stream initiated by the edge agent.
+  rpc Connect(stream AgentMessage) returns (stream ServerMessage);
+}
+
+enum ProbeType {
+  PROBE_TYPE_UNSPECIFIED = 0;
+  PROBE_TYPE_PING = 1;
+  PROBE_TYPE_TCPING = 2;
+  PROBE_TYPE_HTTP = 3;
+  PROBE_TYPE_TRACEROUTE = 4;
+  PROBE_TYPE_DNS = 5;
+}
+
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_QUEUED = 1;
+  TASK_STATUS_RUNNING = 2;
+  TASK_STATUS_COMPLETED = 3;
+  TASK_STATUS_TIMEOUT = 4;
+  TASK_STATUS_ERROR = 5;
+  TASK_STATUS_OVERLOADED = 6;
+  TASK_STATUS_EXPIRED = 7;
+  TASK_STATUS_CANCELLED = 8;
+}
+
+message AgentMessage {
+  oneof payload {
+    RegisterRequest register = 1;
+    Heartbeat heartbeat = 2;
+    TaskAck task_ack = 3;
+    TaskProgress task_progress = 4;
+    TaskResult task_result = 5;
+  }
+}
+
+message ServerMessage {
+  oneof payload {
+    RegisterResponse register_resp = 1;
+    HeartbeatAck heartbeat_ack = 2;
+    DispatchTask dispatch_task = 3;
+    CancelTask cancel_task = 4;
+    ServerDrain server_drain = 5;
+  }
+}
+
+message RegisterRequest {
+  string node_id = 1;
+  string name = 2;
+  string region = 3;
+  string group = 4;
+  uint32 asn = 5;
+  string ipv4 = 6;
+  string ipv6 = 7;
+  repeated ProbeType capabilities = 8;
+  uint32 max_concurrency = 9;
+  string version = 10;
+  map<string, string> labels = 11;
+}
+
+message RegisterResponse {
+  bool accepted = 1;
+  string message = 2;
+  uint32 heartbeat_interval_sec = 3;
+  uint32 assigned_max_concurrency = 4;
+  string assigned_node_id = 5;
+  string assigned_name = 6;
+}
+
+message Heartbeat {
+  string node_id = 1;
+  int64 timestamp_unix_ms = 2;
+  uint32 active_tasks = 3;
+  double cpu_percent = 4;
+  double mem_percent = 5;
+}
+
+message HeartbeatAck {
+  int64 server_unix_ms = 1;
+}
+
+message DispatchTask {
+  string task_id = 1;
+  string subtask_id = 2;
+  ProbeType type = 3;
+  string target = 4;
+  int64 deadline_unix_ms = 5;
+  uint32 timeout_ms = 6;
+  ProbeParams params = 7;
+}
+
+message ProbeParams {
+  oneof params {
+    PingParams ping = 1;
+    TcpingParams tcping = 2;
+    HttpParams http = 3;
+    TracerouteParams traceroute = 4;
+    DnsParams dns = 5;
+  }
+}
+
+message PingParams {
+  uint32 count = 1;
+  uint32 interval_ms = 2;
+  uint32 packet_size = 3;
+  string ip_version = 4; // auto, ipv4, ipv6
+}
+
+message TcpingParams {
+  uint32 port = 1;
+  uint32 count = 2;
+  uint32 interval_ms = 3;
+  string ip_version = 4;
+}
+
+message HttpParams {
+  string method = 1;
+  string host_header = 2;
+  map<string, string> headers = 3;
+  bool follow_redirects = 4;
+  bool insecure_skip_verify = 5;
+  string ip_version = 6;
+}
+
+message TracerouteParams {
+  uint32 max_hops = 1;
+  uint32 queries_per_hop = 2;
+  string protocol = 3; // icmp, udp
+  string ip_version = 4;
+}
+
+message DnsParams {
+  string record_type = 1; // A, AAAA, CNAME, MX, TXT, NS, PTR, SOA
+  string dns_server = 2;
+}
+
+message CancelTask {
+  string task_id = 1;
+  string subtask_id = 2;
+  string reason = 3;
+}
+
+message ServerDrain {
+  string reason = 1;
+  uint32 reconnect_after_sec = 2;
+}
+
+message TaskAck {
+  string task_id = 1;
+  string subtask_id = 2;
+  bool accepted = 3;
+  string reject_reason = 4;
+}
+
+message TaskProgress {
+  string task_id = 1;
+  string subtask_id = 2;
+  string node_id = 3;
+  ProbeType type = 4;
+  oneof progress {
+    PingPacket ping_packet = 10;
+    TracerouteHop traceroute_hop = 11;
+  }
+}
+
+message TaskResult {
+  string task_id = 1;
+  string subtask_id = 2;
+  string node_id = 3;
+  ProbeType type = 4;
+  TaskStatus status = 5;
+  string error_message = 6;
+  int64 started_unix_ms = 7;
+  int64 finished_unix_ms = 8;
+  string resolved_ip = 9;
+
+  oneof result {
+    PingResult ping = 20;
+    TcpingResult tcping = 21;
+    HttpResult http = 22;
+    TracerouteResult traceroute = 23;
+    DnsResult dns = 24;
+  }
+}
+
+message PingPacket {
+  uint32 seq = 1;
+  double rtt_ms = 2;
+  uint32 ttl = 3;
+  bool timeout = 4;
+  string reply_ip = 5;
+}
+
+message PingResult {
+  uint32 sent = 1;
+  uint32 received = 2;
+  double loss_percent = 3;
+  double min_rtt_ms = 4;
+  double avg_rtt_ms = 5;
+  double max_rtt_ms = 6;
+  double mdev_rtt_ms = 7;
+  uint32 ttl = 8;
+  repeated PingPacket packets = 9;
+}
+
+message TcpingResult {
+  uint32 port = 1;
+  uint32 sent = 2;
+  uint32 connected = 3;
+  double loss_percent = 4;
+  double min_rtt_ms = 5;
+  double avg_rtt_ms = 6;
+  double max_rtt_ms = 7;
+  string state = 8; // open, refused, timeout
+  repeated double rtts_ms = 9;
+}
+
+message HttpTiming {
+  double dns_ms = 1;
+  double tcp_ms = 2;
+  double tls_ms = 3;
+  double ttfb_ms = 4;
+  double download_ms = 5;
+  double total_ms = 6;
+}
+
+message HttpResult {
+  int32 status_code = 1;
+  string status_text = 2;
+  string final_url = 3;
+  uint64 content_length = 4;
+  uint32 redirect_count = 5;
+  string tls_version = 6;
+  string tls_subject = 7;
+  HttpTiming timing = 8;
+}
+
+message TracerouteHop {
+  uint32 hop = 1;
+  string ip = 2;
+  string hostname = 3;
+  repeated double rtts_ms = 4;
+  double avg_rtt_ms = 5;
+  double loss_percent = 6;
+  bool timeout = 7;
+}
+
+message TracerouteResult {
+  bool reached = 1;
+  repeated TracerouteHop hops = 2;
+}
+
+message DnsRecord {
+  string name = 1;
+  string type = 2;
+  uint32 ttl = 3;
+  string value = 4;
+}
+
+message DnsResult {
+  string server_used = 1;
+  double query_time_ms = 2;
+  string rcode = 3;
+  repeated DnsRecord records = 4;
+}

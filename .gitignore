@@ -1,0 +1,28 @@
+# Binaries & build outputs
+bin/
+dist/
+*.exe
+*.out
+*.test
+
+# Node / Vite frontend
+web/node_modules/
+web/dist/*
+!web/dist/.gitkeep
+
+# Local configs, databases & secrets
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+*.local.yaml
+*.pem
+*.key
+*.crt
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "11dog.fullname" . }}
+  labels:
+    {{- include "11dog.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+      appProtocol: {{ if .Values.tls.enabled }}https{{ else }}kubernetes.io/h2c{{ end }}
+  selector:
+    {{- include "11dog.selectorLabels" . | nindent 4 }}
+{{- if .Values.service.grpcExternal.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "11dog.fullname" . }}-grpc
+  labels:
+    {{- include "11dog.labels" . | nindent 4 }}
+  {{- with .Values.service.grpcExternal.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.grpcExternal.type }}
+  ports:
+    - port: {{ .Values.service.grpcExternal.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+      {{- if and (eq .Values.service.grpcExternal.type "NodePort") .Values.service.grpcExternal.nodePort }}
+      nodePort: {{ .Values.service.grpcExternal.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "11dog.selectorLabels" . | nindent 4 }}
+{{- end }}

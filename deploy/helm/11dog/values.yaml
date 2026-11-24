@@ -1,0 +1,138 @@
+# Set replicaCount=1 when db.driver=sqlite; switch db.driver=postgres & mq.driver=nats for multi-replica HA.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/dn-11/11dog
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+siteTitle: "11Dog - DN11 网络测速平台"
+networkName: "DN11"
+publicGRPCAddr: ""
+agentDownloadBaseURL: ""
+
+auth:
+  # Set to an existing Secret name containing key `admin-token` (and optional `db-dsn`)
+  existingSecret: ""
+  adminToken: "change-me-dn11-admin-token"
+
+db:
+  # driver: "sqlite" (default single-replica PVC) or "postgres" (multi-replica HA)
+  driver: "sqlite"
+  # For sqlite defaults to /var/lib/11dog/11dog.db; for postgres provide DSN or use existingSecret key `db-dsn`
+  dsn: ""
+  existingSecret: ""
+  sqlite:
+    persistence:
+      enabled: true
+      size: 1Gi
+      storageClassName: ""
+
+tls:
+  enabled: false
+  secretName: ""
+
+mq:
+  # driver: "nats" (recommended for durable buffering & multi-replica) or "memory"
+  driver: "nats"
+  # Leave empty to automatically point to the bundled NATS StatefulSet when nats.enabled=true
+  natsUrl: ""
+  streamName: "DOG_TASKS"
+  maxQueuePerNode: 20
+  taskTTLSec: 60
+
+nats:
+  enabled: true
+  image:
+    repository: nats
+    tag: "2.10-alpine"
+    pullPolicy: IfNotPresent
+  storageSize: 1Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+limits:
+  rateLimitRPM: 180
+  rateLimitBurst: 30
+  maxTargetLen: 512
+  defaultTimeoutMs: 15000
+  maxTimeoutMs: 60000
+  perNodeDispatchRPS: 10
+  taskHistoryTTLSec: 1800
+  allowedCIDRs: []
+  deniedCIDRs: []
+
+dn11Prefixes:
+  - cidr: "172.16.0.0/16"
+    asn: 4211110000
+    owner: "DN11 Backbone"
+    region: "DN11"
+  - cidr: "fd00::/48"
+    asn: 4211110000
+    owner: "DN11 IPv6 Backbone"
+    region: "DN11"
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 9090
+  grpcExternal:
+    enabled: false
+    type: NodePort
+    port: 9090
+    nodePort: 30090
+    annotations: {}
+
+ingress:
+  enabled: false
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+  hosts:
+    - host: 11dog.dn11.example
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+grpcIngress:
+  enabled: false
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+  host: grpc.11dog.dn11.example
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75
+
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  labels: {}
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

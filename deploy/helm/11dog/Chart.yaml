@@ -1,0 +1,12 @@
+apiVersion: v2
+name: 11dog
+description: 11Dog - DN11 Network Diagnostic Platform (ITDog Clone) with reverse-gRPC hub and MQ buffering
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - dn11
+  - network-testing
+  - itdog
+  - grpc
+  - nats
