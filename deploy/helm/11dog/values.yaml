@@ -4,7 +4,8 @@ replicaCount: 1
 image:
   repository: ghcr.io/dn-11/11dog
   pullPolicy: IfNotPresent
-  tag: "latest"
+  # Defaults to the chart appVersion (release charts pin the matching image tag)
+  tag: ""
 
 imagePullSecrets: []
 nameOverride: ""
@@ -12,7 +13,12 @@ fullnameOverride: ""
 
 siteTitle: "11Dog - DN11 网络测速平台"
 networkName: "DN11"
+# Reverse-gRPC address shown to agents / written into install scripts,
+# e.g. "grpc.11dog.example:443" when you expose the grpc port via your own Ingress.
+# Leave empty to derive "<browser host>:9090".
 publicGRPCAddr: ""
+# Whether agents must dial publicGRPCAddr over TLS (e.g. TLS terminated by Ingress / LB).
+publicGRPCTLS: false
 agentDownloadBaseURL: ""
 
 auth:
@@ -82,36 +88,13 @@ dn11Prefixes:
     owner: "DN11 IPv6 Backbone"
     region: "DN11"
 
+# Single Service exposing both ports; Ingress / Gateway is left to the user.
+# The grpc port is plaintext HTTP/2 (h2c) unless tls.enabled=true.
 service:
   type: ClusterIP
   httpPort: 8080
   grpcPort: 9090
-  grpcExternal:
-    enabled: false
-    type: NodePort
-    port: 9090
-    nodePort: 30090
-    annotations: {}
-
-ingress:
-  enabled: false
-  className: traefik
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
-  hosts:
-    - host: 11dog.dn11.example
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
-
-grpcIngress:
-  enabled: false
-  className: traefik
-  annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-  host: grpc.11dog.dn11.example
-  tls: []
+  annotations: {}
 
 resources:
   requests:

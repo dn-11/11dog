@@ -5,6 +5,10 @@ metadata:
   labels:
     {{- include "11dog.labels" . | nindent 4 }}
     app.kubernetes.io/component: server
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -20,30 +24,3 @@ spec:
   selector:
     {{- include "11dog.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: server
-{{- if .Values.service.grpcExternal.enabled }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "11dog.fullname" . }}-grpc
-  labels:
-    {{- include "11dog.labels" . | nindent 4 }}
-    app.kubernetes.io/component: server
-  {{- with .Values.service.grpcExternal.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-spec:
-  type: {{ .Values.service.grpcExternal.type }}
-  ports:
-    - port: {{ .Values.service.grpcExternal.port }}
-      targetPort: grpc
-      protocol: TCP
-      name: grpc
-      {{- if and (eq .Values.service.grpcExternal.type "NodePort") .Values.service.grpcExternal.nodePort }}
-      nodePort: {{ .Values.service.grpcExternal.nodePort }}
-      {{- end }}
-  selector:
-    {{- include "11dog.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: server
-{{- end }}

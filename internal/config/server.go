@@ -12,9 +12,12 @@ import (
 
 // ServerConfig holds all configuration for the 11dog control-plane server.
 type ServerConfig struct {
-	HTTPListenAddr       string             `yaml:"http_listen_addr"`
-	GRPCListenAddr       string             `yaml:"grpc_listen_addr"`
-	PublicGRPCAddr       string             `yaml:"public_grpc_addr"`
+	HTTPListenAddr string `yaml:"http_listen_addr"`
+	GRPCListenAddr string `yaml:"grpc_listen_addr"`
+	PublicGRPCAddr string `yaml:"public_grpc_addr"`
+	// PublicGRPCTLS indicates agents must dial PublicGRPCAddr over TLS even when
+	// the server itself listens in plaintext (e.g. TLS terminated by an Ingress).
+	PublicGRPCTLS        bool               `yaml:"public_grpc_tls"`
 	AgentBinDir          string             `yaml:"agent_bin_dir"`
 	AgentDownloadBaseURL string             `yaml:"agent_download_base_url"`
 	StaticDir            string             `yaml:"static_dir"`
@@ -204,6 +207,9 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 	}
 	if v := os.Getenv("DOG_PUBLIC_GRPC_ADDR"); v != "" {
 		cfg.PublicGRPCAddr = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_PUBLIC_GRPC_TLS"); v != "" {
+		cfg.PublicGRPCTLS = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("DOG_AGENT_BIN_DIR"); v != "" {
 		cfg.AgentBinDir = strings.TrimSpace(v)

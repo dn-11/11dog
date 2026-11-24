@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	tokenParamRe    = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
-	grpcParamRe     = regexp.MustCompile(`^[a-zA-Z0-9._:\[\]-]+$`)
+	tokenParamRe     = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
+	grpcParamRe      = regexp.MustCompile(`^[a-zA-Z0-9._:\[\]-]+$`)
 	binaryFilenameRe = regexp.MustCompile(`^11dog-agent-[a-z0-9-]+(\.exe)?$`)
 )
 
@@ -102,7 +102,7 @@ func ServeInstallScript(cfg *config.ServerConfig) http.HandlerFunc {
 			return
 		}
 
-		tlsEnabled := cfg.TLS.Enabled
+		tlsEnabled := cfg.TLS.Enabled || cfg.PublicGRPCTLS
 		if v := strings.TrimSpace(q.Get("tls")); v != "" {
 			tlsEnabled = v == "1" || strings.EqualFold(v, "true")
 		}

@@ -78,7 +78,7 @@ func NewOrchestrator(cfg *config.ServerConfig, broker mq.Broker, hub *Hub, dn11R
 		o.deniedPrefixes = append(o.deniedPrefixes, p)
 	}
 	hub.SetMetricsCallbacks(HubMetricsCallbacks{
-		OnExpired: func() { o.subtasksExpiredTotal.Add(1) },
+		OnExpired:   func() { o.subtasksExpiredTotal.Add(1) },
 		OnCompleted: func() { o.subtasksCompletedTotal.Add(1) },
 	})
 	return o, nil
@@ -704,7 +704,7 @@ func (o *Orchestrator) AdminOverview() model.AdminOverview {
 		PublicGRPCAddr:         o.cfg.PublicGRPCAddr,
 		AgentDownloadBaseURL:   o.cfg.AgentDownloadBaseURL,
 		HostedBinaries:         ListHostedBinaries(o.cfg.AgentBinDir),
-		TLSEnabled:             o.cfg.TLS.Enabled,
+		TLSEnabled:             o.cfg.TLS.Enabled || o.cfg.PublicGRPCTLS,
 		OnlineNodes:            online,
 		OfflineNodes:           offline,
 		TotalNodes:             len(nodes),

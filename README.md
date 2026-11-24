@@ -53,40 +53,63 @@ go run ./cmd/server --config deploy/server.yaml.example
 go run ./cmd/agent --server 127.0.0.1:9090 --token dog_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+> [!NOTE]
+> 本地模式下若要测试后台的一键安装脚本，需先执行 `make build-agent-linux` 生成 `./bin/11dog-agent-linux-{amd64,arm64}`（对应示例配置中的 `agent_bin_dir: "./bin"`）；容器镜像已内置这两个二进制。
+
 ## 边缘节点部署（服务端托管脚本 + systemd）
 
-`11dog-server` 内置静态安装脚本与二进制分发接口（`GET /scripts/install.sh` 与 `GET /downloads/11dog-agent-linux-{amd64,arm64}`）：
+`11dog-server` 内置安装脚本与 Agent 二进制分发接口（`GET /scripts/install.sh` 与 `GET /downloads/11dog-agent-linux-{amd64,arm64}`）。
 
-- 在管理后台点击节点行的 **「部署脚本」**，直接复制如下一键命令在 Linux 边缘机运行：
+在管理后台点击节点行的 **「部署脚本」**，复制生成的一键命令在 Linux 边缘机（amd64 / arm64）上运行。命令中的 gRPC 地址与 TLS 开关默认取自服务端配置 `public_grpc_addr` / `public_grpc_tls`（Helm 对应 `publicGRPCAddr` / `publicGRPCTLS`），例如 gRPC 经 Ingress 以 443 + TLS 暴露时：
 
 ```bash
-curl -fsSL "https://11dog.dn11.example/scripts/install.sh?token=dog_xxx&grpc=11dog.dn11.example:9090" | sudo bash
+curl -fsSL "https://11dog.dn11.example/scripts/install.sh?token=dog_xxx&grpc=grpc.11dog.dn11.example:443&tls=true" | sudo bash
 ```
 
 - 卸载命令：`curl -fsSL "https://11dog.dn11.example/scripts/install.sh?uninstall=1" | sudo bash`
+- Agent 配置写入 `/etc/11dog/agent.yaml`，日志查看：`journalctl -u 11dog-agent -f`
 - `11dog-agent.service` 默认以非 root 用户 `11dog` 运行，并通过 `AmbientCapabilities=CAP_NET_RAW` 授予原生的 ICMP Ping 与 Traceroute 权限。
 
 ## Server Helm 部署（Kubernetes）
 
-Chart 位于 `deploy/helm/11dog`，默认使用内置 NATS JetStream 有状态缓冲队列及 SQLite PVC（多副本高可用请切换 `db.driver=postgres`）：
+Chart 以 OCI 制品形式托管在 GHCR：`oci://ghcr.io/dn-11/charts/11dog`（推送 `vX.Y.Z` tag 时由 CI 自动发布，Chart 版本为 `X.Y.Z`，并固定使用同 tag 的镜像 `ghcr.io/dn-11/11dog:vX.Y.Z`）。
+
+默认使用内置 NATS JetStream 缓冲队列 + SQLite PVC（单副本）；多副本高可用请切换 `db.driver=postgres` 并调大 `replicaCount`。
+
+Chart 只创建一个 Service（默认 `ClusterIP`，可通过 `service.type` / `service.annotations` 调整），**不包含 Ingress**，对外暴露方式请按自己的集群自行配置：
+
+| 端口 | 名称 | 协议 | 用途 |
+| --- | --- | --- | --- |
+| `8080` | `http` | HTTP/1.1 | Web 前台、`/admin` 后台、API、SSE 实时流、`/scripts/install.sh`、`/downloads/*` |
+| `9090` | `grpc` | gRPC（h2c 明文；`tls.enabled=true` 时为 TLS） | Agent 反连长连接 |
 
 ```bash
-# 校验与渲染测试
-helm lint deploy/helm/11dog
+# 查看默认 values
+helm show values oci://ghcr.io/dn-11/charts/11dog > values.yaml
 
-# 安装（开启 NATS JetStream 缓冲 + NodePort 暴露 gRPC 给集群外 DN11 Agent）
-helm upgrade --install 11dog ./deploy/helm/11dog \
+# 安装 / 升级（可加 --version X.Y.Z 固定版本，不加则安装最新正式版）
+helm upgrade --install dn11dog oci://ghcr.io/dn-11/charts/11dog \
   --namespace 11dog --create-namespace \
   --set auth.adminToken="your-strong-admin-token" \
-  --set service.grpcExternal.enabled=true \
-  --set ingress.enabled=true \
-  --set ingress.hosts[0].host=11dog.dn11.example \
-  --set ingress.hosts[0].paths[0].path=/ \
-  --set ingress.hosts[0].paths[0].pathType=Prefix
+  --set publicGRPCAddr=grpc.11dog.dn11.example:443 \
+  --set publicGRPCTLS=true
+```
+
+安装后 Service 为 `dn11dog.11dog.svc`（Release 名包含 `11dog` 时直接用作资源名，否则为 `<release>-11dog`）。未配置 Ingress 前可 `kubectl -n 11dog port-forward svc/dn11dog 8080:8080` 访问 `http://127.0.0.1:8080/admin`。
+
+`publicGRPCAddr` / `publicGRPCTLS` 填 Agent 实际能连到的 gRPC 入口（例如你自己配置的 gRPC Ingress `域名:443` + TLS），后台生成的一键安装命令会自动带上；留空则默认 `<访问域名>:9090` 明文。
+
+从源码目录安装（开发调试）：
+
+```bash
+helm lint deploy/helm/11dog
+helm upgrade --install dn11dog ./deploy/helm/11dog -n 11dog --create-namespace -f values.yaml
 ```
 
 > [!IMPORTANT]
-> Chart 默认使用 **Traefik** 作为 IngressClass（已配置 `web`/`websecure` entrypoint 与 `kubernetes.io/h2c` gRPC `appProtocol`），默认镜像为 `ghcr.io/dn-11/11dog:latest`。若改用 Nginx Ingress，请关闭缓冲 (`proxy-buffering: "off"`) 以确保 SSE 实时流不被缓冲。
+> - Release 名需以字母开头（Service 名须符合 DNS-1035），因此请勿使用 `11dog` 作为 Release 名，推荐 `dn11dog`，或设置 `fullnameOverride`。
+> - 自行配置 Ingress 时：Web 路由需关闭响应缓冲以保证 SSE 实时流（如 Nginx `nginx.ingress.kubernetes.io/proxy-buffering: "off"`）；gRPC 路由需以 HTTP/2 明文（h2c）转发到 `grpc` 端口（如 Nginx `nginx.ingress.kubernetes.io/backend-protocol: "GRPC"`，Traefik `IngressRoute` 的 `scheme: h2c`）。
+> - gRPC 为长连接流，注意放宽 Ingress 的读超时（如 Traefik v3 entrypoint 默认 `readTimeout=60s`，Nginx `proxy-read-timeout`），否则 Agent 会被周期性断开重连。
 
 ## 管理后台与前台隔离
 

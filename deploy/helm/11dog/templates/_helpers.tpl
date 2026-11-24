@@ -14,9 +14,6 @@
 {{- $fullname = printf "%s-%s" .Release.Name $name -}}
 {{- end -}}
 {{- end -}}
-{{- if regexMatch "^[0-9]" $fullname -}}
-{{- $fullname = printf "dn-%s" $fullname -}}
-{{- end -}}
 {{- $fullname | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
@@ -51,3 +48,4 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-auth" (include "11dog.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
