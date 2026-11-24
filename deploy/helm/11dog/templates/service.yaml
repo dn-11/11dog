@@ -4,6 +4,7 @@ metadata:
   name: {{ include "11dog.fullname" . }}
   labels:
     {{- include "11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -18,6 +19,7 @@ spec:
       appProtocol: {{ if .Values.tls.enabled }}https{{ else }}kubernetes.io/h2c{{ end }}
   selector:
     {{- include "11dog.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 {{- if .Values.service.grpcExternal.enabled }}
 ---
 apiVersion: v1
@@ -26,6 +28,7 @@ metadata:
   name: {{ include "11dog.fullname" . }}-grpc
   labels:
     {{- include "11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
   {{- with .Values.service.grpcExternal.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -42,4 +45,5 @@ spec:
       {{- end }}
   selector:
     {{- include "11dog.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 {{- end }}

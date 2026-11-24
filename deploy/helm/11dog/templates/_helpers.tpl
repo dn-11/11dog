@@ -3,16 +3,21 @@
 {{- end -}}
 
 {{- define "11dog.fullname" -}}
+{{- $fullname := "" -}}
 {{- if .Values.fullnameOverride -}}
-{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- $fullname = .Values.fullnameOverride -}}
 {{- else -}}
 {{- $name := default .Chart.Name .Values.nameOverride -}}
 {{- if contains $name .Release.Name -}}
-{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- $fullname = .Release.Name -}}
 {{- else -}}
-{{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
+{{- $fullname = printf "%s-%s" .Release.Name $name -}}
 {{- end -}}
 {{- end -}}
+{{- if regexMatch "^[0-9]" $fullname -}}
+{{- $fullname = printf "dn-%s" $fullname -}}
+{{- end -}}
+{{- $fullname | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{- define "11dog.chart" -}}
