@@ -22,8 +22,8 @@ import (
 	natsmq "github.com/11dog/11dog/internal/mq/nats"
 	"github.com/11dog/11dog/internal/server"
 	"github.com/11dog/11dog/internal/store"
+	"github.com/11dog/11dog/internal/wsgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -31,7 +31,6 @@ func main() {
 	var (
 		configPath = flag.String("config", "", "path to server YAML configuration")
 		httpAddr   = flag.String("http-listen", "", "override HTTP listen address (e.g. :8080)")
-		grpcAddr   = flag.String("grpc-listen", "", "override gRPC listen address (e.g. :9090)")
 		staticDir  = flag.String("static-dir", "", "optional filesystem directory for Vue SPA assets")
 		showVer    = flag.Bool("version", false, "print server version and exit")
 	)
@@ -51,9 +50,6 @@ func main() {
 	}
 	if *httpAddr != "" {
 		cfg.HTTPListenAddr = *httpAddr
-	}
-	if *grpcAddr != "" {
-		cfg.GRPCListenAddr = *grpcAddr
 	}
 	if *staticDir != "" {
 		cfg.StaticDir = *staticDir
@@ -132,7 +128,7 @@ func main() {
 	limiter := server.NewIPRateLimiter(cfg.Limits.RateLimitRPM, cfg.Limits.RateLimitBurst)
 	limiter.StartCleanup(rootCtx)
 
-	grpcOpts := []grpc.ServerOption{
+	grpcServer := grpc.NewServer(
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
@@ -141,26 +137,11 @@ func main() {
 			Time:    25 * time.Second,
 			Timeout: 10 * time.Second,
 		}),
-	}
-	if cfg.TLS.Enabled {
-		creds, err := credentials.NewServerTLSFromFile(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-		if err != nil {
-			logger.Error("failed to load gRPC TLS credentials", "error", err)
-			os.Exit(1)
-		}
-		grpcOpts = append(grpcOpts, grpc.Creds(creds))
-	}
-
-	grpcServer := grpc.NewServer(grpcOpts...)
+	)
 	agentv1.RegisterAgentHubServer(grpcServer, hub)
+	wsLis := wsgrpc.NewListener(cfg.HTTPListenAddr)
 
-	grpcLis, err := net.Listen("tcp", cfg.GRPCListenAddr)
-	if err != nil {
-		logger.Error("failed to listen gRPC", "addr", cfg.GRPCListenAddr, "error", err)
-		os.Exit(1)
-	}
-
-	httpHandler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, limiter, logger)
+	httpHandler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, limiter, logger, wsLis)
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           httpHandler,
@@ -168,14 +149,13 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("starting reverse-gRPC hub", "addr", cfg.GRPCListenAddr, "tls", cfg.TLS.Enabled)
-		if err := grpcServer.Serve(grpcLis); err != nil {
-			logger.Error("gRPC server exited", "error", err)
+		if err := grpcServer.Serve(wsLis); err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Error("WebSocket gRPC server exited", "error", err)
 		}
 	}()
 
 	go func() {
-		logger.Info("starting HTTP API & SPA server", "addr", cfg.HTTPListenAddr)
+		logger.Info("starting HTTP API, SPA & reverse-gRPC WebSocket hub", "addr", cfg.HTTPListenAddr, "ws_path", wsgrpc.DefaultPath)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server exited", "error", err)
 			cancel()
@@ -190,6 +170,7 @@ func main() {
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
+	_ = wsLis.Close()
 	grpcServer.GracefulStop()
 	logger.Info("11dog-server stopped")
 }

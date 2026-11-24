@@ -18,6 +18,7 @@ import (
 	"github.com/11dog/11dog/internal/dn11"
 	"github.com/11dog/11dog/internal/model"
 	"github.com/11dog/11dog/internal/mq"
+	"github.com/11dog/11dog/internal/wsgrpc"
 )
 
 var (
@@ -700,11 +701,10 @@ func (o *Orchestrator) AdminOverview() model.AdminOverview {
 		DBDriver:               o.cfg.DB.Driver,
 		MQDriver:               o.cfg.MQ.Driver,
 		MaxQueuePerNode:        o.cfg.MQ.MaxQueuePerNode,
-		GRPCListenAddr:         o.cfg.GRPCListenAddr,
-		PublicGRPCAddr:         o.cfg.PublicGRPCAddr,
+		WSPath:                 wsgrpc.DefaultPath,
+		PublicWSAddr:           o.cfg.PublicWSAddr,
 		AgentDownloadBaseURL:   o.cfg.AgentDownloadBaseURL,
 		HostedBinaries:         ListHostedBinaries(o.cfg.AgentBinDir),
-		TLSEnabled:             o.cfg.TLS.Enabled || o.cfg.PublicGRPCTLS,
 		OnlineNodes:            online,
 		OfflineNodes:           offline,
 		TotalNodes:             len(nodes),

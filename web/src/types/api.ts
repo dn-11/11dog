@@ -84,11 +84,10 @@ export interface AdminOverview {
   db_driver: string
   mq_driver: string
   max_queue_per_node: number
-  grpc_listen_addr: string
-  public_grpc_addr?: string
+  ws_path: string
+  public_ws_addr?: string
   agent_download_base_url?: string
   hosted_binaries: string[]
-  tls_enabled: boolean
   online_nodes: number
   offline_nodes: number
   total_nodes: number

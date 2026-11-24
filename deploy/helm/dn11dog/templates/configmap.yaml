@@ -7,19 +7,11 @@ metadata:
 data:
   server.yaml: |
     http_listen_addr: ":8080"
-    grpc_listen_addr: ":9090"
-    public_grpc_addr: {{ .Values.publicGRPCAddr | quote }}
-    public_grpc_tls: {{ .Values.publicGRPCTLS }}
+    public_ws_addr: {{ .Values.publicWSAddr | quote }}
     agent_bin_dir: "/opt/11dog/downloads"
     agent_download_base_url: {{ .Values.agentDownloadBaseURL | quote }}
     site_title: {{ .Values.siteTitle | quote }}
     network_name: {{ .Values.networkName | quote }}
-    tls:
-      enabled: {{ .Values.tls.enabled }}
-      {{- if .Values.tls.enabled }}
-      cert_file: "/etc/11dog/tls/tls.crt"
-      key_file: "/etc/11dog/tls/tls.key"
-      {{- end }}
     db:
       driver: {{ .Values.db.driver | quote }}
       {{- if eq .Values.db.driver "sqlite" }}

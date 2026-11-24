@@ -36,5 +36,5 @@ COPY --from=go-builder /out/11dog-server /usr/local/bin/11dog-server
 COPY --from=go-builder /out/downloads /opt/11dog/downloads
 ENV DOG_AGENT_BIN_DIR=/opt/11dog/downloads
 USER dog
-EXPOSE 8080 9090
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/11dog-server"]

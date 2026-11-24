@@ -17,18 +17,23 @@ import (
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/model"
 	"github.com/11dog/11dog/internal/store"
+	"github.com/11dog/11dog/internal/wsgrpc"
 	"github.com/11dog/11dog/web"
 )
 
 // Version is set via ldflags at build time.
 var Version = "dev"
 
-// NewHTTPHandler constructs the complete HTTP API + SSE + hosted script + embedded SPA router.
-func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, nodeStore store.NodeStore, limiter *IPRateLimiter, logger *slog.Logger) http.Handler {
+// NewHTTPHandler constructs the complete HTTP API + SSE + reverse-gRPC WebSocket + hosted script + embedded SPA router.
+func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, nodeStore store.NodeStore, limiter *IPRateLimiter, logger *slog.Logger, wsHandler http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	mux := http.NewServeMux()
+
+	if wsHandler != nil {
+		mux.Handle("GET "+wsgrpc.DefaultPath, wsHandler)
+	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})

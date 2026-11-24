@@ -13,12 +13,9 @@ fullnameOverride: ""
 
 siteTitle: "11Dog - DN11 网络测速平台"
 networkName: "DN11"
-# Reverse-gRPC address shown to agents / written into install scripts,
-# e.g. "grpc.11dog.example:443" when you expose the grpc port via your own Ingress.
-# Leave empty to derive "<browser host>:9090".
-publicGRPCAddr: ""
-# Whether agents must dial publicGRPCAddr over TLS (e.g. TLS terminated by Ingress / LB).
-publicGRPCTLS: false
+# Reverse-gRPC WebSocket URL shown to agents / written into install scripts.
+# Leave empty to automatically derive "ws(s)://<browser host>/api/v1/agent/ws".
+publicWSAddr: ""
 agentDownloadBaseURL: ""
 
 auth:
@@ -37,10 +34,6 @@ db:
       enabled: true
       size: 1Gi
       storageClassName: ""
-
-tls:
-  enabled: false
-  secretName: ""
 
 mq:
   # driver: "nats" (recommended for durable buffering & multi-replica) or "memory"
@@ -88,12 +81,10 @@ dn11Prefixes:
     owner: "DN11 IPv6 Backbone"
     region: "DN11"
 
-# Single Service exposing both ports; Ingress / Gateway is left to the user.
-# The grpc port is plaintext HTTP/2 (h2c) unless tls.enabled=true.
+# Single Service exposing the HTTP port (Web / API / SSE / Agent WebSocket); Ingress / Gateway is left to the user.
 service:
   type: ClusterIP
   httpPort: 8080
-  grpcPort: 9090
   annotations: {}
 
 resources:

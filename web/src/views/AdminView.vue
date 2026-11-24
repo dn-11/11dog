@@ -51,19 +51,24 @@ const editForm = ref({
 
 // Hosted Install Script Modal state
 const deployNode = ref<AdminNodeInfo | null>(null)
-const deployGRPCAddr = ref('')
-const deployTLS = ref(false)
+const deployWSAddr = ref('')
 
 let refreshTimer: number | undefined
+
+function defaultWSAgentAddr(): string {
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsPath = overview.value?.ws_path || '/api/v1/agent/ws'
+  return `${wsProto}//${window.location.host}${wsPath}`
+}
 
 const installCmd = computed(() => {
   if (!deployNode.value?.token) return ''
   const origin = window.location.origin
+  const addr = deployWSAddr.value.trim() || defaultWSAgentAddr()
   const params = new URLSearchParams({
     token: deployNode.value.token,
-    grpc: deployGRPCAddr.value.trim() || `${window.location.hostname}:9090`
+    ws: addr
   })
-  if (deployTLS.value) params.set('tls', 'true')
   return `curl -fsSL "${origin}/scripts/install.sh?${params.toString()}" | sudo bash`
 })
 
@@ -73,10 +78,9 @@ const uninstallCmd = computed(() => {
 
 const minimalAgentYaml = computed(() => {
   if (!deployNode.value?.token) return ''
-  const grpc = deployGRPCAddr.value.trim() || `${window.location.hostname}:9090`
-  return `server_addr: "${grpc}"
+  const addr = deployWSAddr.value.trim() || defaultWSAgentAddr()
+  return `server_addr: "${addr}"
 token: "${deployNode.value.token}"
-tls_enabled: ${deployTLS.value}
 heartbeat_interval_sec: 10`
 })
 
@@ -90,9 +94,8 @@ async function loadData(token: string): Promise<boolean> {
     authenticated.value = true
     adminToken.value = token
     sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
-    if (!deployGRPCAddr.value) {
-      deployGRPCAddr.value = ov.public_grpc_addr || `${window.location.hostname}:9090`
-      deployTLS.value = ov.tls_enabled
+    if (!deployWSAddr.value) {
+      deployWSAddr.value = ov.public_ws_addr || defaultWSAgentAddr()
     }
     return true
   } catch (err) {
@@ -195,13 +198,10 @@ async function submitEditNode() {
 
 function openDeployModal(n: AdminNodeInfo) {
   deployNode.value = n
-  if (overview.value?.public_grpc_addr) {
-    deployGRPCAddr.value = overview.value.public_grpc_addr
-  } else if (!deployGRPCAddr.value) {
-    deployGRPCAddr.value = `${window.location.hostname}:9090`
-  }
-  if (overview.value) {
-    deployTLS.value = overview.value.tls_enabled
+  if (overview.value?.public_ws_addr) {
+    deployWSAddr.value = overview.value.public_ws_addr
+  } else if (!deployWSAddr.value) {
+    deployWSAddr.value = defaultWSAgentAddr()
   }
 }
 
@@ -329,7 +329,7 @@ onUnmounted(() => {
             MQ: {{ overview.mq_driver.toUpperCase() }} ({{ overview.max_queue_per_node }}/节点)
           </span>
           <span v-if="overview" class="badge badge-slate mono">
-            gRPC: {{ overview.public_grpc_addr || overview.grpc_listen_addr }} ({{ overview.tls_enabled ? 'TLS' : 'Plain' }})
+            WS: {{ overview.public_ws_addr || overview.ws_path }}
           </span>
         </div>
         <div class="header-actions">
@@ -622,13 +622,9 @@ onUnmounted(() => {
             </p>
 
             <div class="form-grid" style="margin-bottom: 12px">
-              <label class="field-item">
-                <span>反连 gRPC 地址</span>
-                <input v-model="deployGRPCAddr" type="text" class="mono" />
-              </label>
-              <label class="field-check" style="align-self: flex-end; padding-bottom: 6px">
-                <input v-model="deployTLS" type="checkbox" />
-                <span>启用 gRPC TLS</span>
+              <label class="field-item full-span">
+                <span>反连 WebSocket 地址 (ws:// 或 wss://)</span>
+                <input v-model="deployWSAddr" type="text" class="mono" />
               </label>
             </div>
 

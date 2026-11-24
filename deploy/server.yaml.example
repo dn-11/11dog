@@ -1,20 +1,12 @@
 http_listen_addr: ":8080"
-grpc_listen_addr: ":9090"
-# 对外展示的反连 gRPC 地址（留空则根据浏览器访问域名自动拼接 :9090）
-public_grpc_addr: ""
-# Agent 连接 public_grpc_addr 时是否走 TLS（gRPC 经 Ingress/LB 终止 TLS、服务端本身明文监听时设为 true）
-public_grpc_tls: false
+# 对外展示的 Agent 反连 WebSocket 地址（留空则自动使用同源 ws(s)://<当前域名>/api/v1/agent/ws）
+public_ws_addr: ""
 # 托管供 /scripts/install.sh 下载的 Agent 二进制目录
 agent_bin_dir: "./bin"
 agent_download_base_url: ""
 
 site_title: "11Dog - DN11 网络测速平台"
 network_name: "DN11"
-
-tls:
-  enabled: false
-  cert_file: ""
-  key_file: ""
 
 auth:
   admin_token: "change-me-dn11-admin-token"

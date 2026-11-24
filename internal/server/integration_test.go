@@ -23,18 +23,23 @@ import (
 	"github.com/11dog/11dog/internal/mq/memory"
 	"github.com/11dog/11dog/internal/server"
 	"github.com/11dog/11dog/internal/store"
+	"github.com/11dog/11dog/internal/wsgrpc"
 	"google.golang.org/grpc"
 )
 
 type testStack struct {
-	cfg     *config.ServerConfig
-	store   *store.SQLStore
-	broker  *memory.Broker
-	hub     *server.Hub
-	orch    *server.Orchestrator
-	httpSrv *httptest.Server
-	grpcSrv *grpc.Server
-	grpcLis net.Listener
+	cfg       *config.ServerConfig
+	store     *store.SQLStore
+	broker    *memory.Broker
+	hub       *server.Hub
+	orch      *server.Orchestrator
+	httpSrv   *httptest.Server
+	wsGRPCSrv *grpc.Server
+	wsLis     *wsgrpc.Listener
+}
+
+func (s *testStack) wsURL() string {
+	return strings.Replace(s.httpSrv.URL, "http://", "ws://", 1) + wsgrpc.DefaultPath
 }
 
 func startTestStack(t *testing.T, maxQueuePerNode int, dispatchRPS float64) *testStack {
@@ -66,36 +71,34 @@ func startTestStack(t *testing.T, maxQueuePerNode int, dispatchRPS float64) *tes
 		t.Fatal(err)
 	}
 
-	grpcLis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	grpcSrv := grpc.NewServer()
-	agentv1.RegisterAgentHubServer(grpcSrv, hub)
+	wsLis := wsgrpc.NewListener("test-ws")
+	wsGRPCSrv := grpc.NewServer()
+	agentv1.RegisterAgentHubServer(wsGRPCSrv, hub)
 	go func() {
-		_ = grpcSrv.Serve(grpcLis)
+		_ = wsGRPCSrv.Serve(wsLis)
 	}()
 
-	handler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, server.NewIPRateLimiter(600, 100), logger)
+	handler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, server.NewIPRateLimiter(600, 100), logger, wsLis)
 	httpSrv := httptest.NewServer(handler)
 
 	t.Cleanup(func() {
 		hub.DrainAll("test done", 1)
 		httpSrv.Close()
-		grpcSrv.Stop()
+		_ = wsLis.Close()
+		wsGRPCSrv.Stop()
 		_ = broker.Close()
 		_ = nodeStore.Close()
 	})
 
 	return &testStack{
-		cfg:     cfg,
-		store:   nodeStore,
-		broker:  broker,
-		hub:     hub,
-		orch:    orch,
-		httpSrv: httpSrv,
-		grpcSrv: grpcSrv,
-		grpcLis: grpcLis,
+		cfg:       cfg,
+		store:     nodeStore,
+		broker:    broker,
+		hub:       hub,
+		orch:      orch,
+		httpSrv:   httpSrv,
+		wsGRPCSrv: wsGRPCSrv,
+		wsLis:     wsLis,
 	}
 }
 
@@ -121,7 +124,7 @@ func registerDBNodeAndStartAgent(
 	}
 
 	cfg := config.DefaultAgentConfig()
-	cfg.ServerAddr = st.grpcLis.Addr().String()
+	cfg.ServerAddr = st.wsURL()
 	cfg.Token = rec.Token
 	// Deliberately pass bogus local node metadata to ensure server uses DB authority.
 	cfg.NodeID = "bogus-local-id"
@@ -436,7 +439,7 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	}
 
 	// 2. Verify hosted install script rendering & parameter validation.
-	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&grpc=10.0.0.1:9090")
+	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&ws=wss://10.0.0.1/api/v1/agent/ws")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,6 +447,7 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	_ = scriptResp.Body.Close()
 	if scriptResp.StatusCode != http.StatusOK ||
 		!strings.Contains(string(scriptBody), created.Token) ||
+		!strings.Contains(string(scriptBody), "wss://10.0.0.1/api/v1/agent/ws") ||
 		!strings.Contains(string(scriptBody), "CAP_NET_RAW") {
 		t.Fatalf("unexpected hosted install script status=%d body=%s", scriptResp.StatusCode, scriptBody)
 	}
@@ -459,7 +463,7 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 
 	// 3. Connect agent with ONLY token & bogus local ID/Name; verify server enforces DB identity.
 	agentCfg := config.DefaultAgentConfig()
-	agentCfg.ServerAddr = stack.grpcLis.Addr().String()
+	agentCfg.ServerAddr = stack.wsURL()
 	agentCfg.Token = created.Token
 	agentCfg.NodeID = "evil-spoof-id"
 	agentCfg.Name = "恶意伪造名称"
@@ -517,5 +521,117 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	}
 	if stack.hub.OnlineCount() != 0 {
 		t.Fatalf("expected rotated token to disconnect session, online=%d", stack.hub.OnlineCount())
+	}
+}
+
+func TestE2EReverseGRPCOverWebSocket(t *testing.T) {
+	stack := startTestStack(t, 20, 50)
+
+	// 1. Plain ws:// agent connecting to the same HTTP server on /api/v1/agent/ws.
+	recWS, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
+		ID:             "node-ws-1",
+		Name:           "WS 隧道节点",
+		Region:         "华东",
+		Group:          "DN11-WS",
+		ASN:            4211110301,
+		MaxConcurrency: 4,
+		Enabled:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wsAddr := strings.Replace(stack.httpSrv.URL, "http://", "ws://", 1) + wsgrpc.DefaultPath
+	wsAgentCfg := config.DefaultAgentConfig()
+	wsAgentCfg.ServerAddr = wsAddr
+	wsAgentCfg.Token = recWS.Token
+	wsAgentCfg.HeartbeatIntervalSec = 2
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		_ = agent.NewClient(wsAgentCfg, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	}()
+
+	// 2. TLS wss:// agent connecting through an HTTPS server (simulating Ingress/Nginx TLS termination).
+	tlsHTTPSrv := httptest.NewTLSServer(server.NewHTTPHandler(
+		stack.cfg,
+		stack.hub,
+		stack.orch,
+		stack.store,
+		server.NewIPRateLimiter(600, 100),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		stack.wsLis,
+	))
+	t.Cleanup(tlsHTTPSrv.Close)
+
+	recWSS, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
+		ID:             "node-wss-1",
+		Name:           "WSS 隧道节点",
+		Region:         "香港",
+		Group:          "DN11-WSS",
+		ASN:            4211110302,
+		MaxConcurrency: 4,
+		Enabled:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wssAddr := strings.Replace(tlsHTTPSrv.URL, "https://", "wss://", 1)
+	wssAgentCfg := config.DefaultAgentConfig()
+	wssAgentCfg.ServerAddr = wssAddr
+	wssAgentCfg.Token = recWSS.Token
+	wssAgentCfg.TLSInsecureSkipVerify = true
+	wssAgentCfg.HeartbeatIntervalSec = 2
+	go func() {
+		_ = agent.NewClient(wssAgentCfg, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	}()
+
+	waitForOnlineNodes(t, stack.httpSrv.URL, 2)
+
+	// 3. Execute an HTTP probe task across both WS and WSS agents.
+	targetHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok via wsgrpc"))
+	}))
+	defer targetHTTP.Close()
+
+	snap := createTaskHTTP(t, stack.httpSrv.URL, model.CreateTaskRequest{
+		Type:   model.ProbeHTTP,
+		Target: targetHTTP.URL,
+	})
+	done := waitForSSEDone(t, stack.httpSrv.URL, snap.TaskID)
+	if done.CompletedNodes != 2 {
+		t.Fatalf("CompletedNodes=%d, want 2", done.CompletedNodes)
+	}
+	for _, nodeID := range []string{"node-ws-1", "node-wss-1"} {
+		res := done.Results[nodeID]
+		if res == nil || res.Status != model.StatusCompleted || res.HTTP == nil || res.HTTP.StatusCode != 200 {
+			t.Fatalf("unexpected result for %s: %+v", nodeID, res)
+		}
+	}
+
+	// 4. Verify install script defaults to ws(s)://<host>/api/v1/agent/ws and accepts explicit wss:// param.
+	reqDefault, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/scripts/install.sh?token="+recWS.Token, nil)
+	reqDefault.Header.Set("X-Forwarded-Proto", "https")
+	respDefault, err := http.DefaultClient.Do(reqDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyDefault, _ := io.ReadAll(respDefault.Body)
+	_ = respDefault.Body.Close()
+	if respDefault.StatusCode != http.StatusOK || !strings.Contains(string(bodyDefault), "wss://") || !strings.Contains(string(bodyDefault), wsgrpc.DefaultPath) {
+		t.Fatalf("expected default install script to use wss://%s, status=%d body=%s", wsgrpc.DefaultPath, respDefault.StatusCode, bodyDefault)
+	}
+
+	respExplicit, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + recWS.Token + "&ws=wss://11dog.example.com/api/v1/agent/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyExplicit, _ := io.ReadAll(respExplicit.Body)
+	_ = respExplicit.Body.Close()
+	if respExplicit.StatusCode != http.StatusOK || !strings.Contains(string(bodyExplicit), "wss://11dog.example.com/api/v1/agent/ws") {
+		t.Fatalf("expected explicit wss:// ws param to succeed, status=%d body=%s", respExplicit.StatusCode, bodyExplicit)
 	}
 }

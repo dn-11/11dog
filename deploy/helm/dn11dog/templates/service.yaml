@@ -16,11 +16,6 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
-    - port: {{ .Values.service.grpcPort }}
-      targetPort: grpc
-      protocol: TCP
-      name: grpc
-      appProtocol: {{ if .Values.tls.enabled }}https{{ else }}kubernetes.io/h2c{{ end }}
   selector:
     {{- include "dn11dog.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: server

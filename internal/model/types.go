@@ -119,11 +119,10 @@ type AdminOverview struct {
 	DBDriver               string   `json:"db_driver"`
 	MQDriver               string   `json:"mq_driver"`
 	MaxQueuePerNode        int      `json:"max_queue_per_node"`
-	GRPCListenAddr         string   `json:"grpc_listen_addr"`
-	PublicGRPCAddr         string   `json:"public_grpc_addr,omitempty"`
+	WSPath                 string   `json:"ws_path"`
+	PublicWSAddr           string   `json:"public_ws_addr,omitempty"`
 	AgentDownloadBaseURL   string   `json:"agent_download_base_url,omitempty"`
 	HostedBinaries         []string `json:"hosted_binaries"`
-	TLSEnabled             bool     `json:"tls_enabled"`
 	OnlineNodes            int      `json:"online_nodes"`
 	OfflineNodes           int      `json:"offline_nodes"`
 	TotalNodes             int      `json:"total_nodes"`

@@ -1,11 +1,10 @@
 # 11Dog Edge Agent Configuration (/etc/11dog/agent.yaml)
 # 节点身份（名称/区域/网络组/ASN/并发配额）由控制端数据库统一下发，无需在节点侧配置。
-# 边缘节点仅需提供控制端反连 gRPC 地址与在后台生成的节点专属通信 Token。
+# 边缘节点仅需提供控制端反连 WebSocket 地址（ws:// 或 wss://）与在后台生成的节点专属通信 Token。
 
-server_addr: "11dog.dn11.example:9090"
+server_addr: "wss://11dog.dn11.example/api/v1/agent/ws"
 token: "dog_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-tls_enabled: false
 tls_insecure_skip_verify: false
 tls_ca_file: ""
 

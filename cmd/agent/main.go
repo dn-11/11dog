@@ -30,7 +30,7 @@ func main() {
 
 	var (
 		configPath     = flag.String("config", "", "path to agent YAML configuration")
-		serverAddr     = flag.String("server", "", "override server reverse-gRPC address (host:port)")
+		serverAddr     = flag.String("server", "", "override server WebSocket reverse-gRPC URL (e.g. wss://host/api/v1/agent/ws)")
 		token          = flag.String("token", "", "override agent auth token")
 		nodeID         = flag.String("node-id", "", "override unique node ID")
 		name           = flag.String("name", "", "override display name")
@@ -38,8 +38,7 @@ func main() {
 		group          = flag.String("group", "", "override ISP/operator group (e.g. DN11-IX, BGP)")
 		asn            = flag.Uint("asn", 0, "override DN11 ASN")
 		maxConcurrency = flag.Uint("max-concurrency", 0, "override max concurrent probe tasks")
-		tlsEnabled     = flag.Bool("tls", false, "enable TLS for gRPC connection")
-		tlsInsecure    = flag.Bool("insecure", false, "skip TLS certificate verification")
+		tlsInsecure    = flag.Bool("insecure", false, "skip TLS certificate verification for wss://")
 		showVer        = flag.Bool("version", false, "print agent version and exit")
 	)
 	flag.Parse()
@@ -79,9 +78,6 @@ func main() {
 	}
 	if *maxConcurrency > 0 {
 		cfg.MaxConcurrency = uint32(*maxConcurrency)
-	}
-	if *tlsEnabled {
-		cfg.TLSEnabled = true
 	}
 	if *tlsInsecure {
 		cfg.TLSInsecureSkipVerify = true

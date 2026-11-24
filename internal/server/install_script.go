@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,11 +10,12 @@ import (
 	"strings"
 
 	"github.com/11dog/11dog/internal/config"
+	"github.com/11dog/11dog/internal/wsgrpc"
 )
 
 var (
 	tokenParamRe     = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
-	grpcParamRe      = regexp.MustCompile(`^[a-zA-Z0-9._:\[\]-]+$`)
+	wsParamRe        = regexp.MustCompile(`^wss?://[a-zA-Z0-9._:\[\]-]+(?:/[a-zA-Z0-9._~/-]*)?$`)
 	binaryFilenameRe = regexp.MustCompile(`^11dog-agent-[a-z0-9-]+(\.exe)?$`)
 )
 
@@ -79,32 +79,21 @@ func ServeInstallScript(cfg *config.ServerConfig) http.HandlerFunc {
 			return
 		}
 
-		grpcAddr := strings.TrimSpace(q.Get("grpc"))
-		if grpcAddr == "" {
-			grpcAddr = strings.TrimSpace(cfg.PublicGRPCAddr)
+		wsAddr := strings.TrimSpace(q.Get("ws"))
+		if wsAddr == "" {
+			wsAddr = strings.TrimSpace(cfg.PublicWSAddr)
 		}
-		if grpcAddr == "" {
-			host := r.Host
-			if h, _, err := net.SplitHostPort(r.Host); err == nil && h != "" {
-				host = h
+		if wsAddr == "" {
+			wsScheme := "ws"
+			if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+				wsScheme = "wss"
 			}
-			grpcPort := "9090"
-			if _, p, err := net.SplitHostPort(cfg.GRPCListenAddr); err == nil && p != "" {
-				grpcPort = p
-			}
-			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-				host = "[" + host + "]"
-			}
-			grpcAddr = host + ":" + grpcPort
+			wsAddr = fmt.Sprintf("%s://%s%s", wsScheme, r.Host, wsgrpc.DefaultPath)
 		}
-		if !grpcParamRe.MatchString(grpcAddr) {
-			http.Error(w, "invalid grpc parameter", http.StatusBadRequest)
+		wsAddr, err := wsgrpc.NormalizeWSURL(wsAddr)
+		if err != nil || !wsParamRe.MatchString(wsAddr) {
+			http.Error(w, "invalid ws parameter", http.StatusBadRequest)
 			return
-		}
-
-		tlsEnabled := cfg.TLS.Enabled || cfg.PublicGRPCTLS
-		if v := strings.TrimSpace(q.Get("tls")); v != "" {
-			tlsEnabled = v == "1" || strings.EqualFold(v, "true")
 		}
 
 		downloadBase := strings.TrimRight(cfg.AgentDownloadBaseURL, "/")
@@ -116,7 +105,7 @@ func ServeInstallScript(cfg *config.ServerConfig) http.HandlerFunc {
 			downloadBase = fmt.Sprintf("%s://%s/downloads", scheme, r.Host)
 		}
 
-		script := fmt.Sprintf(installScriptTemplate, downloadBase, grpcAddr, token, tlsEnabled)
+		script := fmt.Sprintf(installScriptTemplate, downloadBase, wsAddr, token)
 		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(script))
@@ -145,7 +134,6 @@ set -euo pipefail
 DOWNLOAD_BASE=%q
 SERVER_ADDR=%q
 AGENT_TOKEN=%q
-TLS_ENABLED=%t
 
 INSTALL_BIN="/usr/local/bin/11dog-agent"
 CONFIG_DIR="/etc/11dog"
@@ -191,7 +179,6 @@ echo "[3/4] 写入通信凭据配置 ${CONFIG_FILE} (节点身份由服务端数
 cat > "${CONFIG_FILE}" <<EOF
 server_addr: "${SERVER_ADDR}"
 token: "${AGENT_TOKEN}"
-tls_enabled: ${TLS_ENABLED}
 heartbeat_interval_sec: 10
 EOF
 chown root:11dog "${CONFIG_FILE}"

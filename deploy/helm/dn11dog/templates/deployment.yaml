@@ -65,9 +65,6 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
-            - name: grpc
-              containerPort: 9090
-              protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
@@ -91,11 +88,6 @@ spec:
             - name: sqlite-data
               mountPath: /var/lib/11dog
             {{- end }}
-            {{- if and .Values.tls.enabled .Values.tls.secretName }}
-            - name: grpc-tls
-              mountPath: /etc/11dog/tls
-              readOnly: true
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -104,11 +96,6 @@ spec:
         - name: sqlite-data
           persistentVolumeClaim:
             claimName: {{ include "dn11dog.fullname" . }}-data
-        {{- end }}
-        {{- if and .Values.tls.enabled .Values.tls.secretName }}
-        - name: grpc-tls
-          secret:
-            secretName: {{ .Values.tls.secretName }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

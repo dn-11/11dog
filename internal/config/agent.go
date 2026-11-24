@@ -14,7 +14,6 @@ import (
 type AgentConfig struct {
 	ServerAddr            string            `yaml:"server_addr"`
 	Token                 string            `yaml:"token"`
-	TLSEnabled            bool              `yaml:"tls_enabled"`
 	TLSInsecureSkipVerify bool              `yaml:"tls_insecure_skip_verify"`
 	TLSCAFile             string            `yaml:"tls_ca_file"`
 	NodeID                string            `yaml:"node_id"`
@@ -37,7 +36,7 @@ func DefaultAgentConfig() *AgentConfig {
 		hostname = "dn11-node"
 	}
 	return &AgentConfig{
-		ServerAddr:           "127.0.0.1:9090",
+		ServerAddr:           "ws://127.0.0.1:8080/api/v1/agent/ws",
 		NodeID:               hostname,
 		Name:                 hostname,
 		Region:               "DN11",
@@ -102,9 +101,6 @@ func applyAgentEnvOverrides(cfg *AgentConfig) {
 	}
 	if v := os.Getenv("DOG_TOKEN"); v != "" {
 		cfg.Token = v
-	}
-	if v := os.Getenv("DOG_TLS_ENABLED"); v != "" {
-		cfg.TLSEnabled = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("DOG_TLS_INSECURE"); v != "" {
 		cfg.TLSInsecureSkipVerify = strings.EqualFold(v, "true") || v == "1"

@@ -13,17 +13,15 @@ import (
 // ServerConfig holds all configuration for the 11dog control-plane server.
 type ServerConfig struct {
 	HTTPListenAddr string `yaml:"http_listen_addr"`
-	GRPCListenAddr string `yaml:"grpc_listen_addr"`
-	PublicGRPCAddr string `yaml:"public_grpc_addr"`
-	// PublicGRPCTLS indicates agents must dial PublicGRPCAddr over TLS even when
-	// the server itself listens in plaintext (e.g. TLS terminated by an Ingress).
-	PublicGRPCTLS        bool               `yaml:"public_grpc_tls"`
+	// PublicWSAddr optionally overrides the WebSocket reverse-gRPC URL written into
+	// hosted install scripts (e.g. "wss://11dog.dn11.example/api/v1/agent/ws").
+	// When empty, it is derived from the incoming HTTP request origin.
+	PublicWSAddr         string             `yaml:"public_ws_addr"`
 	AgentBinDir          string             `yaml:"agent_bin_dir"`
 	AgentDownloadBaseURL string             `yaml:"agent_download_base_url"`
 	StaticDir            string             `yaml:"static_dir"`
 	SiteTitle            string             `yaml:"site_title"`
 	NetworkName          string             `yaml:"network_name"`
-	TLS                  ServerTLSConfig    `yaml:"tls"`
 	Auth                 ServerAuthConfig   `yaml:"auth"`
 	DB                   DBConfig           `yaml:"db"`
 	MQ                   MQConfig           `yaml:"mq"`
@@ -34,12 +32,6 @@ type ServerConfig struct {
 type DBConfig struct {
 	Driver string `yaml:"driver"` // sqlite | postgres
 	DSN    string `yaml:"dsn"`
-}
-
-type ServerTLSConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
 }
 
 type ServerAuthConfig struct {
@@ -71,7 +63,6 @@ type LimitsConfig struct {
 func DefaultServerConfig() *ServerConfig {
 	return &ServerConfig{
 		HTTPListenAddr: ":8080",
-		GRPCListenAddr: ":9090",
 		AgentBinDir:    "./bin",
 		SiteTitle:      "11Dog - DN11 网络测速平台",
 		NetworkName:    "DN11",
@@ -155,9 +146,6 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 	if v := os.Getenv("DOG_HTTP_LISTEN"); v != "" {
 		cfg.HTTPListenAddr = v
 	}
-	if v := os.Getenv("DOG_GRPC_LISTEN"); v != "" {
-		cfg.GRPCListenAddr = v
-	}
 	if v := os.Getenv("DOG_STATIC_DIR"); v != "" {
 		cfg.StaticDir = v
 	}
@@ -190,26 +178,14 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 			cfg.MQ.TaskTTLSec = n
 		}
 	}
-	if v := os.Getenv("DOG_TLS_ENABLED"); v != "" {
-		cfg.TLS.Enabled = strings.EqualFold(v, "true") || v == "1"
-	}
-	if v := os.Getenv("DOG_TLS_CERT_FILE"); v != "" {
-		cfg.TLS.CertFile = v
-	}
-	if v := os.Getenv("DOG_TLS_KEY_FILE"); v != "" {
-		cfg.TLS.KeyFile = v
-	}
 	if v := os.Getenv("DOG_DB_DRIVER"); v != "" {
 		cfg.DB.Driver = v
 	}
 	if v := os.Getenv("DOG_DB_DSN"); v != "" {
 		cfg.DB.DSN = v
 	}
-	if v := os.Getenv("DOG_PUBLIC_GRPC_ADDR"); v != "" {
-		cfg.PublicGRPCAddr = strings.TrimSpace(v)
-	}
-	if v := os.Getenv("DOG_PUBLIC_GRPC_TLS"); v != "" {
-		cfg.PublicGRPCTLS = strings.EqualFold(v, "true") || v == "1"
+	if v := os.Getenv("DOG_PUBLIC_WS_ADDR"); v != "" {
+		cfg.PublicWSAddr = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_AGENT_BIN_DIR"); v != "" {
 		cfg.AgentBinDir = strings.TrimSpace(v)

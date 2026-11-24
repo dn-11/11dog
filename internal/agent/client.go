@@ -3,11 +3,15 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
+	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,8 +20,8 @@ import (
 	"github.com/11dog/11dog/internal/agent/probe"
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/model"
+	"github.com/11dog/11dog/internal/wsgrpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
@@ -91,26 +95,48 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) dialCredentials() (credentials.TransportCredentials, error) {
-	if !c.cfg.TLSEnabled {
-		return insecure.NewCredentials(), nil
+func (c *Client) wsTLSConfig() (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: c.cfg.TLSInsecureSkipVerify, //nolint:gosec
 	}
 	if c.cfg.TLSCAFile != "" {
-		return credentials.NewClientTLSFromFile(c.cfg.TLSCAFile, "")
+		pemData, err := os.ReadFile(c.cfg.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls_ca_file %q: %w", c.cfg.TLSCAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return nil, fmt.Errorf("parse tls_ca_file %q: no valid PEM certificates", c.cfg.TLSCAFile)
+		}
+		tlsCfg.RootCAs = pool
 	}
-	return credentials.NewTLS(&tls.Config{
-		InsecureSkipVerify: c.cfg.TLSInsecureSkipVerify, //nolint:gosec
-	}), nil
+	return tlsCfg, nil
 }
 
 func (c *Client) runOnce(ctx context.Context) (time.Duration, error) {
-	creds, err := c.dialCredentials()
+	wsURL, err := wsgrpc.NormalizeWSURL(c.cfg.ServerAddr)
 	if err != nil {
-		return 0, fmt.Errorf("load tls creds: %w", err)
+		return 0, fmt.Errorf("invalid server_addr: %w", err)
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return 0, fmt.Errorf("parse server_addr: %w", err)
+	}
+	var tlsCfg *tls.Config
+	if u.Scheme == "wss" {
+		tlsCfg, err = c.wsTLSConfig()
+		if err != nil {
+			return 0, fmt.Errorf("load ws tls config: %w", err)
+		}
 	}
 
+	// TLS (wss://) is terminated by the WebSocket transport layer; gRPC runs plaintext inside the WS tunnel.
 	dialOpts := []grpc.DialOption{
-		grpc.WithTransportCredentials(creds),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(dialCtx context.Context, _ string) (net.Conn, error) {
+			return wsgrpc.DialContext(dialCtx, wsURL, tlsCfg)
+		}),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                20 * time.Second,
 			Timeout:             10 * time.Second,
@@ -118,7 +144,7 @@ func (c *Client) runOnce(ctx context.Context) (time.Duration, error) {
 		}),
 	}
 
-	conn, err := grpc.NewClient(c.cfg.ServerAddr, dialOpts...)
+	conn, err := grpc.NewClient("passthrough:///"+u.Host, dialOpts...)
 	if err != nil {
 		return 0, fmt.Errorf("grpc new client: %w", err)
 	}
@@ -197,8 +223,8 @@ func (c *Client) runOnce(ctx context.Context) (time.Duration, error) {
 		assignedNodeID = c.cfg.NodeID
 	}
 
-	c.logger.Info("connected to 11dog-server via reverse gRPC",
-		"server", c.cfg.ServerAddr,
+	c.logger.Info("connected to 11dog-server via reverse gRPC over WebSocket",
+		"server", wsURL,
 		"node_id", assignedNodeID,
 		"assigned_name", regResp.AssignedName,
 		"max_concurrency", regResp.AssignedMaxConcurrency,

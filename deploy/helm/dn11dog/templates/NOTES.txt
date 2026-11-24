@@ -6,15 +6,13 @@
   管理后台: http://127.0.0.1:8080/admin
 
 2. Service:
-  {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}  (http: Web / API / SSE / 安装脚本)
-  {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.grpcPort }}  (grpc: Agent 反连, {{ if .Values.tls.enabled }}TLS{{ else }}h2c 明文{{ end }})
-  集群外访问请自行配置 Ingress / Gateway / LoadBalancer。
+  {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}  (http: Web / API / SSE / 安装脚本 / Agent 反连 WebSocket /api/v1/agent/ws)
+  集群外访问请自行配置普通 HTTP(S) Ingress / Gateway / LoadBalancer（无需单独暴露 gRPC 端口）。
 
 3. 节点接入:
   登录 /admin -> 「+ 新增节点」-> 节点行「部署脚本」复制一键安装命令。
-{{- if .Values.publicGRPCAddr }}
-  Agent 反连地址: {{ .Values.publicGRPCAddr }} ({{ if or .Values.publicGRPCTLS .Values.tls.enabled }}TLS{{ else }}Plain{{ end }})
+{{- if .Values.publicWSAddr }}
+  Agent 反连地址: {{ .Values.publicWSAddr }}
 {{- else }}
-  未设置 publicGRPCAddr，安装命令将默认使用 "<访问域名>:9090"；经 Ingress 暴露 gRPC 时请设置
-  publicGRPCAddr=<gRPC域名>:443 与 publicGRPCTLS=true。
+  未设置 publicWSAddr，安装命令将默认使用同源 WebSocket 隧道 "ws(s)://<访问域名>/api/v1/agent/ws"。
 {{- end }}
