@@ -1,13 +1,13 @@
 11Dog DN11 网络测速平台已成功部署！
 
 1. 访问 Web UI 与管理后台（未配置 Ingress 时可先端口转发）:
-  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "11dog.fullname" . }} 8080:{{ .Values.service.httpPort }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "dn11dog.fullname" . }} 8080:{{ .Values.service.httpPort }}
   测速前台: http://127.0.0.1:8080
   管理后台: http://127.0.0.1:8080/admin
 
 2. Service:
-  {{ include "11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}  (http: Web / API / SSE / 安装脚本)
-  {{ include "11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.grpcPort }}  (grpc: Agent 反连, {{ if .Values.tls.enabled }}TLS{{ else }}h2c 明文{{ end }})
+  {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}  (http: Web / API / SSE / 安装脚本)
+  {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.grpcPort }}  (grpc: Agent 反连, {{ if .Values.tls.enabled }}TLS{{ else }}h2c 明文{{ end }})
   集群外访问请自行配置 Ingress / Gateway / LoadBalancer。
 
 3. 节点接入:

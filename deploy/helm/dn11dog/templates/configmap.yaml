@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "11dog.fullname" . }}-config
+  name: {{ include "dn11dog.fullname" . }}-config
   labels:
-    {{- include "11dog.labels" . | nindent 4 }}
+    {{- include "dn11dog.labels" . | nindent 4 }}
 data:
   server.yaml: |
     http_listen_addr: ":8080"
@@ -29,7 +29,7 @@ data:
       {{- end }}
     mq:
       driver: {{ .Values.mq.driver | quote }}
-      nats_url: {{ include "11dog.natsUrl" . | quote }}
+      nats_url: {{ include "dn11dog.natsUrl" . | quote }}
       stream_name: {{ .Values.mq.streamName | quote }}
       max_queue_per_node: {{ .Values.mq.maxQueuePerNode }}
       task_ttl_sec: {{ .Values.mq.taskTTLSec }}

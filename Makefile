@@ -23,8 +23,8 @@ test:
 	go test -v ./...
 
 helm-lint:
-	helm lint deploy/helm/11dog
-	helm template 11dog deploy/helm/11dog >/dev/null
+	helm lint deploy/helm/dn11dog
+	helm template dn11dog deploy/helm/dn11dog >/dev/null
 
 clean:
 	rm -rf bin/ web/dist/*

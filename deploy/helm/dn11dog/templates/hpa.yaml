@@ -2,14 +2,14 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "11dog.fullname" . }}
+  name: {{ include "dn11dog.fullname" . }}
   labels:
-    {{- include "11dog.labels" . | nindent 4 }}
+    {{- include "dn11dog.labels" . | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "11dog.fullname" . }}
+    name: {{ include "dn11dog.fullname" . }}
   minReplicas: {{ .Values.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.maxReplicas }}
   metrics:

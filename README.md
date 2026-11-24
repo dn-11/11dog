@@ -72,7 +72,7 @@ curl -fsSL "https://11dog.dn11.example/scripts/install.sh?token=dog_xxx&grpc=grp
 
 ## Server Helm 部署（Kubernetes）
 
-Chart 以 OCI 制品形式托管在 GHCR：`oci://ghcr.io/dn-11/charts/11dog`（推送 `vX.Y.Z` tag 时由 CI 自动发布，Chart 版本为 `X.Y.Z`，并固定使用同 tag 的镜像 `ghcr.io/dn-11/11dog:vX.Y.Z`）。
+Chart 以 OCI 制品形式托管在 GHCR：`oci://ghcr.io/dn-11/charts/dn11dog`（推送 `vX.Y.Z` tag 时由 CI 自动发布，Chart 版本为 `X.Y.Z`，并固定使用同 tag 的镜像 `ghcr.io/dn-11/11dog:vX.Y.Z`）。
 
 默认使用内置 NATS JetStream 缓冲队列 + SQLite PVC（单副本）；多副本高可用请切换 `db.driver=postgres` 并调大 `replicaCount`。
 
@@ -85,29 +85,29 @@ Chart 只创建一个 Service（默认 `ClusterIP`，可通过 `service.type` / 
 
 ```bash
 # 查看默认 values
-helm show values oci://ghcr.io/dn-11/charts/11dog > values.yaml
+helm show values oci://ghcr.io/dn-11/charts/dn11dog > values.yaml
 
 # 安装 / 升级（可加 --version X.Y.Z 固定版本，不加则安装最新正式版）
-helm upgrade --install dn11dog oci://ghcr.io/dn-11/charts/11dog \
+helm upgrade --install dn11dog oci://ghcr.io/dn-11/charts/dn11dog \
   --namespace 11dog --create-namespace \
   --set auth.adminToken="your-strong-admin-token" \
   --set publicGRPCAddr=grpc.11dog.dn11.example:443 \
   --set publicGRPCTLS=true
 ```
 
-安装后 Service 为 `dn11dog.11dog.svc`（Release 名包含 `11dog` 时直接用作资源名，否则为 `<release>-11dog`）。未配置 Ingress 前可 `kubectl -n 11dog port-forward svc/dn11dog 8080:8080` 访问 `http://127.0.0.1:8080/admin`。
+安装后 Service 为 `dn11dog.11dog.svc`（所有资源均以 `dn11dog` 为前缀，如 `dn11dog-nats`、`dn11dog-data`；Release 名包含 `dn11dog` 时直接用作资源名，否则为 `<release>-dn11dog`）。未配置 Ingress 前可 `kubectl -n 11dog port-forward svc/dn11dog 8080:8080` 访问 `http://127.0.0.1:8080/admin`。
 
 `publicGRPCAddr` / `publicGRPCTLS` 填 Agent 实际能连到的 gRPC 入口（例如你自己配置的 gRPC Ingress `域名:443` + TLS），后台生成的一键安装命令会自动带上；留空则默认 `<访问域名>:9090` 明文。
 
 从源码目录安装（开发调试）：
 
 ```bash
-helm lint deploy/helm/11dog
-helm upgrade --install dn11dog ./deploy/helm/11dog -n 11dog --create-namespace -f values.yaml
+helm lint deploy/helm/dn11dog
+helm upgrade --install dn11dog ./deploy/helm/dn11dog -n 11dog --create-namespace -f values.yaml
 ```
 
 > [!IMPORTANT]
-> - Release 名需以字母开头（Service 名须符合 DNS-1035），因此请勿使用 `11dog` 作为 Release 名，推荐 `dn11dog`，或设置 `fullnameOverride`。
+> - 推荐 Release 名直接使用 `dn11dog`（资源名即为 `dn11dog`）；Release 名须以字母开头（Service 名须符合 DNS-1035），也可通过 `fullnameOverride` 自定义资源名。
 > - 自行配置 Ingress 时：Web 路由需关闭响应缓冲以保证 SSE 实时流（如 Nginx `nginx.ingress.kubernetes.io/proxy-buffering: "off"`）；gRPC 路由需以 HTTP/2 明文（h2c）转发到 `grpc` 端口（如 Nginx `nginx.ingress.kubernetes.io/backend-protocol: "GRPC"`，Traefik `IngressRoute` 的 `scheme: h2c`）。
 > - gRPC 为长连接流，注意放宽 Ingress 的读超时（如 Traefik v3 entrypoint 默认 `readTimeout=60s`，Nginx `proxy-read-timeout`），否则 Agent 会被周期性断开重连。
 

@@ -67,7 +67,7 @@ jobs:
       contents: read
       packages: write
     env:
-      CHART_DIR: deploy/helm/11dog
+      CHART_DIR: deploy/helm/dn11dog
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -89,4 +89,4 @@ jobs:
             --username "${{ github.actor }}" --password-stdin
           # appVersion = git tag, which matches the image tag produced by type=ref,event=tag
           helm package "${CHART_DIR}" --version "${VERSION}" --app-version "${GITHUB_REF_NAME}" -d dist
-          helm push "dist/11dog-${VERSION}.tgz" "oci://${REGISTRY}/${OWNER}/charts"
+          helm push "dist/dn11dog-${VERSION}.tgz" "oci://${REGISTRY}/${OWNER}/charts"

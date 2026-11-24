@@ -1,16 +1,16 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "11dog.fullname" . }}
+  name: {{ include "dn11dog.fullname" . }}
   labels:
-    {{- include "11dog.labels" . | nindent 4 }}
+    {{- include "dn11dog.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "11dog.selectorLabels" . | nindent 6 }}
+      {{- include "dn11dog.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: server
   template:
     metadata:
@@ -23,7 +23,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "11dog.selectorLabels" . | nindent 8 }}
+        {{- include "dn11dog.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: server
     spec:
       {{- with .Values.imagePullSecrets }}
@@ -45,7 +45,7 @@ spec:
             - name: DOG_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "11dog.secretName" . }}
+                  name: {{ include "dn11dog.secretName" . }}
                   key: admin-token
             {{- if .Values.db.existingSecret }}
             - name: DOG_DB_DSN
@@ -57,7 +57,7 @@ spec:
             - name: DOG_DB_DSN
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "11dog.secretName" . }}
+                  name: {{ include "dn11dog.secretName" . }}
                   key: db-dsn
                   optional: true
             {{- end }}
@@ -99,11 +99,11 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "11dog.fullname" . }}-config
+            name: {{ include "dn11dog.fullname" . }}-config
         {{- if and (eq .Values.db.driver "sqlite") .Values.db.sqlite.persistence.enabled }}
         - name: sqlite-data
           persistentVolumeClaim:
-            claimName: {{ include "11dog.fullname" . }}-data
+            claimName: {{ include "dn11dog.fullname" . }}-data
         {{- end }}
         {{- if and .Values.tls.enabled .Values.tls.secretName }}
         - name: grpc-tls

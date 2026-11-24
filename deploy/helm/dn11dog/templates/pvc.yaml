@@ -2,9 +2,9 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: {{ include "11dog.fullname" . }}-data
+  name: {{ include "dn11dog.fullname" . }}-data
   labels:
-    {{- include "11dog.labels" . | nindent 4 }}
+    {{- include "dn11dog.labels" . | nindent 4 }}
 spec:
   accessModes:
     - ReadWriteOnce
