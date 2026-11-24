@@ -76,6 +76,14 @@ func main() {
 	rootCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	if cfg.DN11Registry.Enabled {
+		dn11Reg.StartSync(rootCtx, dn11.SyncOptions{
+			URL:      cfg.DN11Registry.URL,
+			Interval: time.Duration(cfg.DN11Registry.RefreshIntervalSec) * time.Second,
+			Logger:   logger,
+		})
+	}
+
 	var broker mq.Broker
 	switch cfg.MQ.Driver {
 	case "memory":

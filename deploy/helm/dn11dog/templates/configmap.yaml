@@ -37,5 +37,9 @@ data:
         {{- toYaml .Values.limits.allowedCIDRs | nindent 8 }}
       denied_cidrs:
         {{- toYaml .Values.limits.deniedCIDRs | nindent 8 }}
+    dn11_registry:
+      enabled: {{ .Values.dn11Registry.enabled }}
+      url: {{ .Values.dn11Registry.url | quote }}
+      refresh_interval_sec: {{ .Values.dn11Registry.refreshIntervalSec }}
     dn11_prefixes:
       {{- toYaml .Values.dn11Prefixes | nindent 6 }}

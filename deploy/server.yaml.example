@@ -34,6 +34,12 @@ limits:
   allowed_cidrs: []
   denied_cidrs: []
 
+dn11_registry:
+  # 定时从 DN11 Registry 拉取并驻留内存，用于解析目标 IP / Traceroute 跳点的 ASN 与归属
+  enabled: true
+  url: "https://github.com/dn-11/registry/archive/HEAD.tar.gz"
+  refresh_interval_sec: 1800
+
 dn11_prefixes:
   - cidr: "172.16.0.0/16"
     asn: 4211110000

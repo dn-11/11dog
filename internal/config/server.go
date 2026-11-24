@@ -26,7 +26,15 @@ type ServerConfig struct {
 	DB                   DBConfig           `yaml:"db"`
 	MQ                   MQConfig           `yaml:"mq"`
 	Limits               LimitsConfig       `yaml:"limits"`
+	DN11Registry         DN11RegistryConfig `yaml:"dn11_registry"`
 	DN11Prefixes         []dn11.PrefixEntry `yaml:"dn11_prefixes"`
+}
+
+// DN11RegistryConfig configures periodic in-memory synchronization from the remote DN11 registry.
+type DN11RegistryConfig struct {
+	Enabled            bool   `yaml:"enabled"`
+	URL                string `yaml:"url"`
+	RefreshIntervalSec int    `yaml:"refresh_interval_sec"`
 }
 
 type DBConfig struct {
@@ -86,6 +94,11 @@ func DefaultServerConfig() *ServerConfig {
 			PerNodeDispatchRPS: 10,
 			TaskHistoryTTLSec:  1800,
 		},
+		DN11Registry: DN11RegistryConfig{
+			Enabled:            true,
+			URL:                dn11.DefaultRegistryURL,
+			RefreshIntervalSec: 1800,
+		},
 		DN11Prefixes: []dn11.PrefixEntry{
 			{CIDR: "172.16.0.0/16", ASN: 4211110000, Owner: "DN11 Backbone", Region: "DN11"},
 			{CIDR: "fd00::/48", ASN: 4211110000, Owner: "DN11 IPv6 Backbone", Region: "DN11"},
@@ -138,6 +151,12 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	}
 	if cfg.Limits.TaskHistoryTTLSec <= 0 {
 		cfg.Limits.TaskHistoryTTLSec = 1800
+	}
+	if cfg.DN11Registry.URL == "" {
+		cfg.DN11Registry.URL = dn11.DefaultRegistryURL
+	}
+	if cfg.DN11Registry.RefreshIntervalSec <= 0 {
+		cfg.DN11Registry.RefreshIntervalSec = 1800
 	}
 	return cfg, nil
 }
@@ -192,5 +211,16 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 	}
 	if v := os.Getenv("DOG_AGENT_DOWNLOAD_BASE_URL"); v != "" {
 		cfg.AgentDownloadBaseURL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_DN11_REGISTRY_ENABLED"); v != "" {
+		cfg.DN11Registry.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("DOG_DN11_REGISTRY_URL"); v != "" {
+		cfg.DN11Registry.URL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_DN11_REGISTRY_REFRESH_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.DN11Registry.RefreshIntervalSec = n
+		}
 	}
 }

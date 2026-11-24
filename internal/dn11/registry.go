@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"github.com/11dog/11dog/internal/model"
 )
@@ -21,18 +23,24 @@ type parsedPrefix struct {
 	match  model.DN11Match
 }
 
-// Registry performs longest-prefix lookup against configured DN11 CIDRs.
+// Registry performs lock-free longest-prefix lookup against in-memory DN11 CIDRs
+// and supports atomic hot-reloading from a remote registry.
 type Registry struct {
-	entries []parsedPrefix
+	entries atomic.Pointer[[]parsedPrefix]
+
+	mu     sync.Mutex
+	static []parsedPrefix
 }
 
-// NewRegistry builds a prefix lookup registry from configured PrefixEntry slices.
-func NewRegistry(entries []PrefixEntry) (*Registry, error) {
+func parseEntries(entries []PrefixEntry, strict bool) ([]parsedPrefix, error) {
 	parsed := make([]parsedPrefix, 0, len(entries))
 	for _, entry := range entries {
 		p, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
-			return nil, fmt.Errorf("invalid dn11 prefix %q: %w", entry.CIDR, err)
+			if strict {
+				return nil, fmt.Errorf("invalid dn11 prefix %q: %w", entry.CIDR, err)
+			}
+			continue
 		}
 		p = p.Masked()
 		parsed = append(parsed, parsedPrefix{
@@ -45,11 +53,46 @@ func NewRegistry(entries []PrefixEntry) (*Registry, error) {
 			},
 		})
 	}
+	return parsed, nil
+}
+
+func sortAndDedupe(primary, fallback []parsedPrefix) []parsedPrefix {
+	seen := make(map[netip.Prefix]struct{}, len(primary)+len(fallback))
+	merged := make([]parsedPrefix, 0, len(primary)+len(fallback))
+	for _, item := range primary {
+		if _, ok := seen[item.prefix]; ok {
+			continue
+		}
+		seen[item.prefix] = struct{}{}
+		merged = append(merged, item)
+	}
+	for _, item := range fallback {
+		if _, ok := seen[item.prefix]; ok {
+			continue
+		}
+		seen[item.prefix] = struct{}{}
+		merged = append(merged, item)
+	}
 	// Sort most-specific (longest mask bits) first for longest-prefix matching.
-	sort.Slice(parsed, func(i, j int) bool {
-		return parsed[i].prefix.Bits() > parsed[j].prefix.Bits()
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].prefix.Bits() != merged[j].prefix.Bits() {
+			return merged[i].prefix.Bits() > merged[j].prefix.Bits()
+		}
+		return merged[i].prefix.String() < merged[j].prefix.String()
 	})
-	return &Registry{entries: parsed}, nil
+	return merged
+}
+
+// NewRegistry builds a prefix lookup registry from statically configured PrefixEntry slices.
+func NewRegistry(entries []PrefixEntry) (*Registry, error) {
+	parsed, err := parseEntries(entries, true)
+	if err != nil {
+		return nil, err
+	}
+	merged := sortAndDedupe(parsed, nil)
+	r := &Registry{static: parsed}
+	r.entries.Store(&merged)
+	return r, nil
 }
 
 // DefaultRegistry returns a registry pre-populated with common DN11 private ranges
@@ -62,6 +105,20 @@ func DefaultRegistry() *Registry {
 	return r
 }
 
+// UpdateRemote atomically replaces the synced remote prefixes while retaining
+// statically configured prefixes as fallback/overrides.
+func (r *Registry) UpdateRemote(entries []PrefixEntry) int {
+	if r == nil {
+		return 0
+	}
+	remote, _ := parseEntries(entries, false)
+	r.mu.Lock()
+	merged := sortAndDedupe(remote, r.static)
+	r.entries.Store(&merged)
+	r.mu.Unlock()
+	return len(merged)
+}
+
 // Lookup resolves an IP string to the most specific matching DN11 metadata.
 func (r *Registry) Lookup(ipStr string) *model.DN11Match {
 	if r == nil || ipStr == "" {
@@ -72,7 +129,11 @@ func (r *Registry) Lookup(ipStr string) *model.DN11Match {
 		return nil
 	}
 	addr = addr.Unmap()
-	for _, entry := range r.entries {
+	ptr := r.entries.Load()
+	if ptr == nil {
+		return nil
+	}
+	for _, entry := range *ptr {
 		if entry.prefix.Contains(addr) {
 			copyMatch := entry.match
 			return &copyMatch
@@ -81,10 +142,14 @@ func (r *Registry) Lookup(ipStr string) *model.DN11Match {
 	return nil
 }
 
-// Len returns the number of registered prefixes.
+// Len returns the number of currently loaded prefixes.
 func (r *Registry) Len() int {
 	if r == nil {
 		return 0
 	}
-	return len(r.entries)
+	ptr := r.entries.Load()
+	if ptr == nil {
+		return 0
+	}
+	return len(*ptr)
 }

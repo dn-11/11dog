@@ -71,6 +71,11 @@ limits:
   allowedCIDRs: []
   deniedCIDRs: []
 
+dn11Registry:
+  enabled: true
+  url: "https://github.com/dn-11/registry/archive/HEAD.tar.gz"
+  refreshIntervalSec: 1800
+
 dn11Prefixes:
   - cidr: "172.16.0.0/16"
     asn: 4211110000
