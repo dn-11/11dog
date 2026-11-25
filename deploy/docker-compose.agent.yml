@@ -1,0 +1,16 @@
+services:
+  11dog-agent:
+    image: ghcr.io/dn-11/11dog-agent:latest
+    container_name: 11dog-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    environment:
+      DOG_NATS_ADDR: "wss://nats.dn11.example"
+      DOG_NATS_CREDS_FILE: "/etc/11dog/agent.creds"
+      DOG_MAX_CONCURRENCY: "8"
+    volumes:
+      - ./agent.creds:/etc/11dog/agent.creds:ro

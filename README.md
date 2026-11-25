@@ -118,6 +118,8 @@ docker compose up -d
 
 支持 Linux `amd64` / `arm64`：
 
+### 方式一：一键安装脚本（systemd，推荐）
+
 1. 登录管理后台 `/admin`，点击 **「+ 新增节点」** 填写节点名称、区域、网络组与 ASN（服务端自动签发该节点专属的 NATS `.creds` 凭据）；
 2. 点击节点行的 **「部署脚本」**，复制一键安装命令并在边缘机上执行：
 
@@ -138,6 +140,39 @@ journalctl -u 11dog-agent -f
 
 # 卸载 Agent
 curl -fsSL "https://11dog.dn11.example/scripts/uninstall.sh" | sudo bash
+```
+
+### 方式二：Docker Compose（Host 网络）
+
+如需通过容器运行 Agent，使用 `network_mode: host` 共享宿主机网络栈与 DN11 路由表（并授予 `CAP_NET_RAW` 以支持原生 ICMP Ping / Traceroute）。
+
+1. 从管理后台 **「部署脚本」** 弹窗复制节点专属 `.creds` 并保存为同目录下的 `agent.creds`；
+2. 参考 [deploy/docker-compose.agent.yml](deploy/docker-compose.agent.yml) 创建 `docker-compose.yml`：
+
+```yaml
+services:
+  11dog-agent:
+    image: ghcr.io/dn-11/11dog-agent:latest
+    container_name: 11dog-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    environment:
+      DOG_NATS_ADDR: "wss://nats.dn11.example"
+      DOG_NATS_CREDS_FILE: "/etc/11dog/agent.creds"
+      DOG_MAX_CONCURRENCY: "8"
+    volumes:
+      - ./agent.creds:/etc/11dog/agent.creds:ro
+```
+
+启动与运维：
+
+```bash
+docker compose up -d
+docker compose logs -f 11dog-agent
 ```
 
 ---

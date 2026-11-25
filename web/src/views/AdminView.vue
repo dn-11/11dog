@@ -120,6 +120,28 @@ pid_file: "/opt/11dog/11dog-agent.pid"
 max_concurrency: ${deployNode.value.max_concurrency || 8}`
 })
 
+const dockerComposeAgentYaml = computed(() => {
+  if (!deployNode.value) return ''
+  const addr = deployNATSAddr.value.trim() || defaultNATSAddr()
+  const maxConc = deployNode.value.max_concurrency || 8
+  return `services:
+  11dog-agent:
+    image: ghcr.io/dn-11/11dog-agent:latest
+    container_name: 11dog-agent
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    environment:
+      DOG_NATS_ADDR: "${addr}"
+      DOG_NATS_CREDS_FILE: "/etc/11dog/agent.creds"
+      DOG_MAX_CONCURRENCY: "${maxConc}"
+    volumes:
+      - ./agent.creds:/etc/11dog/agent.creds:ro`
+})
+
 async function loadData(token: string): Promise<boolean> {
   loading.value = true
   authError.value = ''
@@ -898,9 +920,19 @@ onUnmounted(() => {
               <pre class="mono guide-pre">{{ minimalAgentYaml }}</pre>
             </div>
 
+            <div class="code-section">
+              <div class="code-head">
+                <span>4. Docker Compose 安装参考 (docker-compose.yml，需同目录放置 agent.creds)</span>
+                <button type="button" class="btn btn-outline btn-sm" @click="copyText('Docker Compose 配置', dockerComposeAgentYaml)">
+                  复制 Compose
+                </button>
+              </div>
+              <pre class="mono guide-pre">{{ dockerComposeAgentYaml }}</pre>
+            </div>
+
             <div class="code-section" style="margin-bottom: 0">
               <div class="code-head">
-                <span>4. 卸载命令</span>
+                <span>5. 卸载命令</span>
                 <button type="button" class="btn btn-outline btn-sm" @click="copyText('卸载命令', uninstallCmd)">
                   复制卸载命令
                 </button>
