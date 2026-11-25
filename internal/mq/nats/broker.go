@@ -79,7 +79,7 @@ func NewBroker(ctx context.Context, opts Options) (*Broker, error) {
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:                 opts.StreamName,
 		Subjects:             []string{"tasks.node.*"},
-		Retention:            jetstream.LimitsPolicy,
+		Retention:            jetstream.WorkQueuePolicy,
 		MaxAge:               opts.TaskTTL,
 		MaxMsgsPerSubject:    int64(opts.MaxQueuePerNode),
 		Discard:              jetstream.DiscardNew,
