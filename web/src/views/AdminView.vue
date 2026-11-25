@@ -153,11 +153,17 @@ async function loadData(token: string): Promise<boolean> {
     ])
     overview.value = ov
     nodes.value = nodeList
-    targetPolicy.value = pol
+    const allowRules = pol.allow_rules ?? []
+    const denyRules = pol.deny_rules ?? []
+    targetPolicy.value = {
+      ...pol,
+      allow_rules: allowRules,
+      deny_rules: denyRules
+    }
     if (!policyDirty.value) {
       policyEnabled.value = pol.enabled
-      policyAllowText.value = (pol.allow_rules ?? []).join('\n')
-      policyDenyText.value = (pol.deny_rules ?? []).join('\n')
+      policyAllowText.value = allowRules.join('\n')
+      policyDenyText.value = denyRules.join('\n')
     }
     authenticated.value = true
     adminToken.value = token
@@ -380,13 +386,19 @@ async function saveTargetPolicy() {
       allow_rules: parseRuleLines(policyAllowText.value),
       deny_rules: parseRuleLines(policyDenyText.value)
     })
-    targetPolicy.value = updated
+    const allowRules = updated.allow_rules ?? []
+    const denyRules = updated.deny_rules ?? []
+    targetPolicy.value = {
+      ...updated,
+      allow_rules: allowRules,
+      deny_rules: denyRules
+    }
     policyEnabled.value = updated.enabled
-    policyAllowText.value = (updated.allow_rules ?? []).join('\n')
-    policyDenyText.value = (updated.deny_rules ?? []).join('\n')
+    policyAllowText.value = allowRules.join('\n')
+    policyDenyText.value = denyRules.join('\n')
     policyDirty.value = false
     actionMsg.value = updated.enabled
-      ? `全局目标限制已保存至数据库并刷新内存缓存（允许 ${updated.allow_rules.length} 条，禁止 ${updated.deny_rules.length} 条）`
+      ? `全局目标限制已保存至数据库并刷新内存缓存（允许 ${allowRules.length} 条，禁止 ${denyRules.length} 条）`
       : '全局目标限制已关闭并保存至数据库'
   } catch (err) {
     actionErr.value = err instanceof Error ? err.message : '保存目标限制策略失败'

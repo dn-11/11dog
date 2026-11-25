@@ -113,4 +113,17 @@ func TestTargetPolicyWildcardCIDRAndDBPersistence(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected error for invalid domain rule")
 	}
+
+	// Empty allow/deny rule lists are valid and must return non-nil empty slices.
+	emptyPol, err := mgr2.Update(ctx, model.TargetPolicy{
+		Enabled:    true,
+		AllowRules: nil,
+		DenyRules:  []string{},
+	})
+	if err != nil {
+		t.Fatalf("Update with empty rules failed: %v", err)
+	}
+	if emptyPol.AllowRules == nil || emptyPol.DenyRules == nil || len(emptyPol.AllowRules) != 0 || len(emptyPol.DenyRules) != 0 {
+		t.Fatalf("expected non-nil empty slices, got %#v", emptyPol)
+	}
 }

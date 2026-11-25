@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 
@@ -121,8 +122,8 @@ func (m *TargetPolicyManager) Get() model.TargetPolicy {
 	defer m.mu.RUnlock()
 	return model.TargetPolicy{
 		Enabled:     m.policy.Enabled,
-		AllowRules:  append([]string(nil), m.policy.AllowRules...),
-		DenyRules:   append([]string(nil), m.policy.DenyRules...),
+		AllowRules:  slices.Clone(m.policy.AllowRules),
+		DenyRules:   slices.Clone(m.policy.DenyRules),
 		UpdatedAtMs: m.policy.UpdatedAtMs,
 	}
 }

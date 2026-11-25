@@ -586,6 +586,22 @@ func TestAdminTargetPolicyEnforcement(t *testing.T) {
 	if respOK.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201 for allowed wildcard target, got %d", respOK.StatusCode)
 	}
+
+	// Submitting empty allow/deny rule arrays must succeed and serialize as [] (not null).
+	emptyReq, _ := http.NewRequest(http.MethodPut, stack.httpSrv.URL+"/api/v1/admin/target-policy", strings.NewReader(`{"enabled":true,"allow_rules":[],"deny_rules":[]}`))
+	emptyReq.Header.Set("X-Admin-Token", "test-admin-secret")
+	emptyReq.Header.Set("Content-Type", "application/json")
+	emptyResp, err := http.DefaultClient.Do(emptyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyBody, _ := io.ReadAll(emptyResp.Body)
+	_ = emptyResp.Body.Close()
+	if emptyResp.StatusCode != http.StatusOK ||
+		!strings.Contains(string(emptyBody), `"allow_rules":[]`) ||
+		!strings.Contains(string(emptyBody), `"deny_rules":[]`) {
+		t.Fatalf("PUT empty target-policy status=%d body=%s", emptyResp.StatusCode, emptyBody)
+	}
 }
 
 func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
