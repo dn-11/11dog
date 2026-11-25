@@ -2,6 +2,7 @@ package nats
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +12,21 @@ import (
 
 	"github.com/11dog/11dog/internal/model"
 	"github.com/11dog/11dog/internal/mq"
+	"github.com/11dog/11dog/internal/natsauth"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
+
+// Options configures the NATS JetStream broker connection and stream parameters.
+type Options struct {
+	URL             string
+	UserJWT         string
+	UserSeed        string
+	TLSConfig       *tls.Config
+	StreamName      string
+	MaxQueuePerNode int
+	TaskTTL         time.Duration
+}
 
 // Broker implements mq.Broker backed by NATS JetStream (bounded per-node task streams)
 // and Core NATS Pub/Sub (cross-replica real-time task event fan-out).
@@ -28,26 +41,33 @@ type Broker struct {
 	closed bool
 }
 
-// NewBroker connects to NATS and provisions the bounded JetStream task stream.
-func NewBroker(ctx context.Context, natsURL, streamName string, maxQueuePerNode int, taskTTL time.Duration) (*Broker, error) {
-	if streamName == "" {
-		streamName = "DOG_TASKS"
+// NewBroker connects to NATS using decentralized JWT/NKey credentials and provisions the bounded JetStream task stream.
+func NewBroker(ctx context.Context, opts Options) (*Broker, error) {
+	if opts.StreamName == "" {
+		opts.StreamName = "DOG_TASKS"
 	}
-	if maxQueuePerNode <= 0 {
-		maxQueuePerNode = 20
+	if opts.MaxQueuePerNode <= 0 {
+		opts.MaxQueuePerNode = 20
 	}
-	if taskTTL <= 0 {
-		taskTTL = 60 * time.Second
+	if opts.TaskTTL <= 0 {
+		opts.TaskTTL = 60 * time.Second
 	}
 
-	nc, err := natsgo.Connect(
-		natsURL,
+	dialOpts := []natsgo.Option{
 		natsgo.Name("11dog-server"),
 		natsgo.MaxReconnects(-1),
-		natsgo.ReconnectWait(2*time.Second),
-	)
+		natsgo.ReconnectWait(2 * time.Second),
+	}
+	if opts.UserJWT != "" && opts.UserSeed != "" {
+		dialOpts = append(dialOpts, natsgo.UserJWTAndSeed(opts.UserJWT, opts.UserSeed))
+	}
+	if opts.TLSConfig != nil {
+		dialOpts = append(dialOpts, natsgo.Secure(opts.TLSConfig))
+	}
+
+	nc, err := natsgo.Connect(opts.URL, dialOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("connect nats %q: %w", natsURL, err)
+		return nil, fmt.Errorf("connect nats %q: %w", opts.URL, err)
 	}
 
 	js, err := jetstream.New(nc)
@@ -57,52 +77,44 @@ func NewBroker(ctx context.Context, natsURL, streamName string, maxQueuePerNode 
 	}
 
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:                 streamName,
+		Name:                 opts.StreamName,
 		Subjects:             []string{"tasks.node.*"},
 		Retention:            jetstream.LimitsPolicy,
-		MaxAge:               taskTTL,
-		MaxMsgsPerSubject:    int64(maxQueuePerNode),
+		MaxAge:               opts.TaskTTL,
+		MaxMsgsPerSubject:    int64(opts.MaxQueuePerNode),
 		Discard:              jetstream.DiscardNew,
 		DiscardNewPerSubject: true,
 		Storage:              jetstream.MemoryStorage,
 	})
 	if err != nil {
 		nc.Close()
-		return nil, fmt.Errorf("provision jetstream stream %q: %w", streamName, err)
+		return nil, fmt.Errorf("provision jetstream stream %q: %w", opts.StreamName, err)
 	}
 
 	return &Broker{
 		nc:              nc,
 		js:              js,
-		streamName:      streamName,
-		maxQueuePerNode: maxQueuePerNode,
-		taskTTL:         taskTTL,
+		streamName:      opts.StreamName,
+		maxQueuePerNode: opts.MaxQueuePerNode,
+		taskTTL:         opts.TaskTTL,
 	}, nil
 }
 
-func sanitizeToken(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
-}
+// Conn returns the underlying NATS connection for KV, heartbeats, and control subjects.
+func (b *Broker) Conn() *natsgo.Conn { return b.nc }
+
+// JetStream returns the JetStream context.
+func (b *Broker) JetStream() jetstream.JetStream { return b.js }
+
+// StreamName returns the configured task stream name.
+func (b *Broker) StreamName() string { return b.streamName }
 
 func nodeSubject(nodeID string) string {
-	return "tasks.node." + sanitizeToken(nodeID)
+	return "tasks.node." + natsauth.SanitizeSubjectToken(nodeID)
 }
 
 func resultSubject(taskID string) string {
-	return "results.task." + sanitizeToken(taskID)
+	return "results.task." + natsauth.SanitizeSubjectToken(taskID)
 }
 
 func isQueueFullError(err error) bool {
@@ -149,7 +161,7 @@ func (b *Broker) ConsumeNodeQueue(ctx context.Context, nodeID string, maxInFligh
 	if maxInFlight <= 0 {
 		maxInFlight = 8
 	}
-	safeNode := sanitizeToken(nodeID)
+	safeNode := natsauth.SanitizeSubjectToken(nodeID)
 	consumer, err := b.js.CreateOrUpdateConsumer(ctx, b.streamName, jetstream.ConsumerConfig{
 		Durable:       "node_" + safeNode,
 		FilterSubject: nodeSubject(nodeID),
@@ -260,7 +272,7 @@ func (b *Broker) QueueDepth(nodeID string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	consumer, err := b.js.Consumer(ctx, b.streamName, "node_"+sanitizeToken(nodeID))
+	consumer, err := b.js.Consumer(ctx, b.streamName, "node_"+natsauth.SanitizeSubjectToken(nodeID))
 	if err != nil {
 		return 0
 	}

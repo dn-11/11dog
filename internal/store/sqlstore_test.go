@@ -88,3 +88,34 @@ func TestSQLiteNodeStoreCRUDAndTokenRotation(t *testing.T) {
 		t.Fatalf("expected ErrNotFound after delete, got %v", err)
 	}
 }
+
+func TestSQLiteSettingsPersistence(t *testing.T) {
+	st, err := NewSQLStore("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLStore failed: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	if _, _, err := st.GetSetting(ctx, "target_policy"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing setting, got %v", err)
+	}
+
+	ts1, err := st.SetSetting(ctx, "target_policy", `{"enabled":true}`)
+	if err != nil || ts1 == 0 {
+		t.Fatalf("SetSetting initial failed: ts=%d err=%v", ts1, err)
+	}
+	val, gotTS, err := st.GetSetting(ctx, "target_policy")
+	if err != nil || val != `{"enabled":true}` || gotTS != ts1 {
+		t.Fatalf("GetSetting = (%q, %d, %v), want ({enabled:true}, %d, nil)", val, gotTS, err, ts1)
+	}
+
+	ts2, err := st.SetSetting(ctx, "target_policy", `{"enabled":false}`)
+	if err != nil || ts2 < ts1 {
+		t.Fatalf("SetSetting upsert failed: ts=%d err=%v", ts2, err)
+	}
+	val, _, err = st.GetSetting(ctx, "target_policy")
+	if err != nil || val != `{"enabled":false}` {
+		t.Fatalf("GetSetting after upsert = (%q, %v), want ({enabled:false}, nil)", val, err)
+	}
+}

@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,20 +15,26 @@ import (
 	"syscall"
 	"time"
 
-	agentv1 "github.com/11dog/11dog/gen/agent/v1"
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/dn11"
-	"github.com/11dog/11dog/internal/mq"
-	"github.com/11dog/11dog/internal/mq/memory"
 	natsmq "github.com/11dog/11dog/internal/mq/nats"
+	"github.com/11dog/11dog/internal/natsauth"
 	"github.com/11dog/11dog/internal/server"
 	"github.com/11dog/11dog/internal/store"
-	"github.com/11dog/11dog/internal/wsgrpc"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/keepalive"
+)
+
+const (
+	settingNATSOperatorSeed = "nats_operator_seed"
+	settingNATSAccountSeed  = "nats_account_seed"
 )
 
 func main() {
+	subcmd := ""
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		subcmd = os.Args[1]
+		os.Args = append(os.Args[:1], os.Args[2:]...)
+	}
+
 	var (
 		configPath = flag.String("config", "", "path to server YAML configuration")
 		httpAddr   = flag.String("http-listen", "", "override HTTP listen address (e.g. :8080)")
@@ -36,7 +43,7 @@ func main() {
 	)
 	flag.Parse()
 
-	if *showVer {
+	if *showVer || subcmd == "version" {
 		fmt.Printf("11dog-server %s\n", server.Version)
 		return
 	}
@@ -61,7 +68,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() { _ = nodeStore.Close() }()
-	logger.Info("initialized node database", "driver", cfg.DB.Driver)
+
+	authMgr, err := loadOrInitNATSAuth(context.Background(), nodeStore, cfg)
+	if err != nil {
+		logger.Error("failed to initialize NATS JWT/NKey authority", "error", err)
+		os.Exit(1)
+	}
+
+	if subcmd == "nats-config" {
+		fmt.Print(authMgr.RenderNATSServerConfig("/data/jetstream"))
+		return
+	}
+
+	logger.Info("initialized node database & NATS JWT authority",
+		"driver", cfg.DB.Driver,
+		"operator_pub", authMgr.OperatorPub(),
+		"account_pub", authMgr.AccountPub(),
+	)
 
 	if strings.TrimSpace(cfg.Auth.AdminToken) == "" {
 		logger.Warn("auth.admin_token is empty; /admin APIs will return 503 until configured")
@@ -84,48 +107,63 @@ func main() {
 		})
 	}
 
-	var broker mq.Broker
-	switch cfg.MQ.Driver {
-	case "memory":
-		broker = memory.NewBroker(cfg.MQ.MaxQueuePerNode)
-		logger.Info("initialized in-memory MQ broker", "max_queue_per_node", cfg.MQ.MaxQueuePerNode)
-	case "nats":
-		for attempt := 1; attempt <= 15; attempt++ {
-			initCtx, initCancel := context.WithTimeout(rootCtx, 5*time.Second)
-			broker, err = natsmq.NewBroker(
-				initCtx,
-				cfg.MQ.NATSURL,
-				cfg.MQ.StreamName,
-				cfg.MQ.MaxQueuePerNode,
-				time.Duration(cfg.MQ.TaskTTLSec)*time.Second,
-			)
-			initCancel()
-			if err == nil {
-				break
-			}
-			logger.Warn("waiting for NATS JetStream broker...", "attempt", attempt, "error", err)
-			select {
-			case <-rootCtx.Done():
-				os.Exit(1)
-			case <-time.After(2 * time.Second):
-			}
+	srvJWT, srvSeed, _, err := authMgr.IssueServerCreds()
+	if err != nil {
+		logger.Error("failed to mint server NATS credentials", "error", err)
+		os.Exit(1)
+	}
+
+	tlsCfg, err := buildNATSTLSConfig(cfg.NATS.TLSCAFile, cfg.NATS.TLSInsecureSkipVerify)
+	if err != nil {
+		logger.Error("failed to load NATS TLS config", "error", err)
+		os.Exit(1)
+	}
+
+	var broker *natsmq.Broker
+	for attempt := 1; attempt <= 15; attempt++ {
+		initCtx, initCancel := context.WithTimeout(rootCtx, 5*time.Second)
+		broker, err = natsmq.NewBroker(initCtx, natsmq.Options{
+			URL:             cfg.NATS.URL,
+			UserJWT:         srvJWT,
+			UserSeed:        srvSeed,
+			TLSConfig:       tlsCfg,
+			StreamName:      cfg.NATS.StreamName,
+			MaxQueuePerNode: cfg.NATS.MaxQueuePerNode,
+			TaskTTL:         time.Duration(cfg.NATS.TaskTTLSec) * time.Second,
+		})
+		initCancel()
+		if err == nil {
+			break
 		}
-		if err != nil {
-			logger.Error("failed to initialize NATS JetStream broker", "error", err)
+		logger.Warn("waiting for external NATS JetStream server...", "attempt", attempt, "nats_url", cfg.NATS.URL, "error", err)
+		select {
+		case <-rootCtx.Done():
 			os.Exit(1)
+		case <-time.After(2 * time.Second):
 		}
-		logger.Info("initialized NATS JetStream MQ broker",
-			"nats_url", cfg.MQ.NATSURL,
-			"stream", cfg.MQ.StreamName,
-			"max_queue_per_node", cfg.MQ.MaxQueuePerNode,
-		)
-	default:
-		logger.Error("unknown mq.driver", "driver", cfg.MQ.Driver)
+	}
+	if err != nil {
+		logger.Error("failed to connect to external NATS JetStream", "nats_url", cfg.NATS.URL, "error", err)
 		os.Exit(1)
 	}
 	defer func() { _ = broker.Close() }()
+	logger.Info("connected to external NATS JetStream",
+		"nats_url", cfg.NATS.URL,
+		"stream", cfg.NATS.StreamName,
+		"max_queue_per_node", cfg.NATS.MaxQueuePerNode,
+	)
 
-	hub := server.NewHub(cfg, broker, nodeStore, dn11Reg, logger)
+	hub, err := server.NewHub(rootCtx, cfg, broker, nodeStore, authMgr, logger)
+	if err != nil {
+		logger.Error("failed to initialize NATS hub", "error", err)
+		os.Exit(1)
+	}
+	defer hub.Close()
+
+	if err := hub.EnsureNodeCredsBackfilled(rootCtx); err != nil {
+		logger.Warn("failed to backfill missing node .creds", "error", err)
+	}
+
 	orch, err := server.NewOrchestrator(cfg, broker, hub, dn11Reg)
 	if err != nil {
 		logger.Error("failed to initialize orchestrator", "error", err)
@@ -136,20 +174,7 @@ func main() {
 	limiter := server.NewIPRateLimiter(cfg.Limits.RateLimitRPM, cfg.Limits.RateLimitBurst)
 	limiter.StartCleanup(rootCtx)
 
-	grpcServer := grpc.NewServer(
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    25 * time.Second,
-			Timeout: 10 * time.Second,
-		}),
-	)
-	agentv1.RegisterAgentHubServer(grpcServer, hub)
-	wsLis := wsgrpc.NewListener(cfg.HTTPListenAddr)
-
-	httpHandler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, limiter, logger, wsLis)
+	httpHandler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, limiter, logger)
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPListenAddr,
 		Handler:           httpHandler,
@@ -157,13 +182,7 @@ func main() {
 	}
 
 	go func() {
-		if err := grpcServer.Serve(wsLis); err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Error("WebSocket gRPC server exited", "error", err)
-		}
-	}()
-
-	go func() {
-		logger.Info("starting HTTP API, SPA & reverse-gRPC WebSocket hub", "addr", cfg.HTTPListenAddr, "ws_path", wsgrpc.DefaultPath)
+		logger.Info("starting HTTP API & embedded SPA server", "addr", cfg.HTTPListenAddr)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("HTTP server exited", "error", err)
 			cancel()
@@ -173,12 +192,63 @@ func main() {
 	<-rootCtx.Done()
 	logger.Info("shutting down 11dog-server...")
 
-	hub.DrainAll("server shutting down", 5)
-
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
-	_ = wsLis.Close()
-	grpcServer.GracefulStop()
 	logger.Info("11dog-server stopped")
+}
+
+func loadOrInitNATSAuth(ctx context.Context, st store.NodeStore, cfg *config.ServerConfig) (*natsauth.Manager, error) {
+	opSeed := strings.TrimSpace(cfg.NATS.OperatorSeed)
+	accSeed := strings.TrimSpace(cfg.NATS.AccountSeed)
+
+	if opSeed == "" {
+		if saved, _, err := st.GetSetting(ctx, settingNATSOperatorSeed); err == nil {
+			opSeed = strings.TrimSpace(saved)
+		}
+	}
+	if accSeed == "" {
+		if saved, _, err := st.GetSetting(ctx, settingNATSAccountSeed); err == nil {
+			accSeed = strings.TrimSpace(saved)
+		}
+	}
+
+	mgr, err := natsauth.NewManager(opSeed, accSeed, cfg.NATS.StreamName)
+	if err != nil {
+		return nil, err
+	}
+
+	if opSeed == "" {
+		if _, err := st.SetSetting(ctx, settingNATSOperatorSeed, mgr.OperatorSeed()); err != nil {
+			return nil, fmt.Errorf("persist generated operator seed: %w", err)
+		}
+	}
+	if accSeed == "" {
+		if _, err := st.SetSetting(ctx, settingNATSAccountSeed, mgr.AccountSeed()); err != nil {
+			return nil, fmt.Errorf("persist generated account seed: %w", err)
+		}
+	}
+	return mgr, nil
+}
+
+func buildNATSTLSConfig(caFile string, insecureSkip bool) (*tls.Config, error) {
+	if caFile == "" && !insecureSkip {
+		return nil, nil
+	}
+	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: insecureSkip, //nolint:gosec
+	}
+	if caFile != "" {
+		pemData, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read tls_ca_file %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemData) {
+			return nil, fmt.Errorf("parse tls_ca_file %q: no valid PEM certificates", caFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+	return tlsCfg, nil
 }

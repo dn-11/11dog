@@ -4,46 +4,48 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"math/rand"
-	"net"
-	"net/url"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	agentv1 "github.com/11dog/11dog/gen/agent/v1"
 	"github.com/11dog/11dog/internal/agent/probe"
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/wsgrpc"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
+	"github.com/11dog/11dog/internal/mq"
+	"github.com/11dog/11dog/internal/natsauth"
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Version is set via ldflags at build time.
 var Version = "dev"
 
-// Client manages the reverse-gRPC stream to 11dog-server, edge concurrency guard,
-// task execution, and heartbeat reporting.
+// Client manages the direct NATS JetStream connection, edge concurrency guard,
+// task execution, control commands, and heartbeat reporting.
 type Client struct {
 	cfg    *config.AgentConfig
 	logger *slog.Logger
 
 	sem         chan struct{}
 	activeTasks atomic.Int32
+	updating    atomic.Bool
 
 	cancelMu sync.Mutex
 	cancels  map[string]context.CancelFunc
+
+	// Optional hooks for testing self-update without modifying the test binary.
+	updateExecPathFn func() (string, error)
+	updateRestartFn  func(exePath string) error
 }
 
-// NewClient creates a reverse-gRPC edge agent client.
+// NewClient creates a NATS-native edge agent client.
 func NewClient(cfg *config.AgentConfig, logger *slog.Logger) *Client {
 	if logger == nil {
 		logger = slog.Default()
@@ -60,42 +62,24 @@ func NewClient(cfg *config.AgentConfig, logger *slog.Logger) *Client {
 	}
 }
 
-// Run maintains the reverse-gRPC connection with exponential backoff until ctx is cancelled.
-func (c *Client) Run(ctx context.Context) error {
-	backoff := time.Second
-	const maxBackoff = 30 * time.Second
-
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		drainDelay, err := c.runOnce(ctx)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-
-		wait := backoff + time.Duration(rand.Intn(500))*time.Millisecond
-		if drainDelay > 0 {
-			wait = drainDelay
-			backoff = time.Second
-		} else {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-
-		c.logger.Warn("gRPC session ended; reconnecting", "error", err, "retry_in", wait.String())
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
+func (c *Client) loadCredsBytes() ([]byte, error) {
+	if strings.TrimSpace(c.cfg.Creds) != "" {
+		return []byte(c.cfg.Creds), nil
 	}
+	if strings.TrimSpace(c.cfg.CredsFile) == "" {
+		return nil, errors.New("either creds_file or creds must be configured")
+	}
+	data, err := os.ReadFile(c.cfg.CredsFile)
+	if err != nil {
+		return nil, fmt.Errorf("read creds_file %q: %w", c.cfg.CredsFile, err)
+	}
+	return data, nil
 }
 
-func (c *Client) wsTLSConfig() (*tls.Config, error) {
+func (c *Client) tlsConfig() (*tls.Config, error) {
+	if c.cfg.TLSCAFile == "" && !c.cfg.TLSInsecureSkipVerify {
+		return nil, nil
+	}
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: c.cfg.TLSInsecureSkipVerify, //nolint:gosec
@@ -114,203 +98,254 @@ func (c *Client) wsTLSConfig() (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
-func (c *Client) runOnce(ctx context.Context) (time.Duration, error) {
-	wsURL, err := wsgrpc.NormalizeWSURL(c.cfg.ServerAddr)
+// Run connects directly to NATS using JWT/NKey .creds, starts heartbeats, control listeners,
+// and the JetStream pull consumer until ctx is cancelled.
+func (c *Client) Run(ctx context.Context) error {
+	credsBytes, err := c.loadCredsBytes()
 	if err != nil {
-		return 0, fmt.Errorf("invalid server_addr: %w", err)
-	}
-	u, err := url.Parse(wsURL)
-	if err != nil {
-		return 0, fmt.Errorf("parse server_addr: %w", err)
-	}
-	var tlsCfg *tls.Config
-	if u.Scheme == "wss" {
-		tlsCfg, err = c.wsTLSConfig()
-		if err != nil {
-			return 0, fmt.Errorf("load ws tls config: %w", err)
-		}
+		return err
 	}
 
-	// TLS (wss://) is terminated by the WebSocket transport layer; gRPC runs plaintext inside the WS tunnel.
-	dialOpts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(dialCtx context.Context, _ string) (net.Conn, error) {
-			return wsgrpc.DialContext(dialCtx, wsURL, tlsCfg)
+	nodeID, err := natsauth.ExtractNodeIDFromCreds(credsBytes)
+	if err != nil {
+		if strings.TrimSpace(c.cfg.NodeID) == "" {
+			return fmt.Errorf("extract node_id from creds: %w", err)
+		}
+		nodeID = strings.TrimSpace(c.cfg.NodeID)
+	}
+	safeID := natsauth.SanitizeSubjectToken(nodeID)
+
+	tlsCfg, err := c.tlsConfig()
+	if err != nil {
+		return fmt.Errorf("load tls config: %w", err)
+	}
+
+	opts := []natsgo.Option{
+		natsgo.Name("11dog-agent-" + safeID),
+		natsgo.UserCredentialBytes(credsBytes),
+		natsgo.MaxReconnects(-1),
+		natsgo.ReconnectWait(2 * time.Second),
+		natsgo.DisconnectErrHandler(func(_ *natsgo.Conn, err error) {
+			c.logger.Warn("disconnected from NATS", "node_id", nodeID, "error", err)
 		}),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                20 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
+		natsgo.ReconnectHandler(func(nc *natsgo.Conn) {
+			c.logger.Info("reconnected to NATS", "node_id", nodeID, "url", nc.ConnectedUrl())
 		}),
 	}
+	if tlsCfg != nil {
+		opts = append(opts, natsgo.Secure(tlsCfg))
+	}
 
-	conn, err := grpc.NewClient("passthrough:///"+u.Host, dialOpts...)
+	nc, err := natsgo.Connect(c.cfg.NATSAddr, opts...)
 	if err != nil {
-		return 0, fmt.Errorf("grpc new client: %w", err)
+		return fmt.Errorf("connect nats %q: %w", c.cfg.NATSAddr, err)
 	}
-	defer conn.Close()
+	defer func() {
+		_ = nc.Drain()
+		nc.Close()
+	}()
 
-	streamCtx, streamCancel := context.WithCancel(ctx)
-	defer streamCancel()
-
-	if c.cfg.Token != "" {
-		streamCtx = metadata.AppendToOutgoingContext(streamCtx, "x-agent-token", c.cfg.Token)
-	}
-
-	client := agentv1.NewAgentHubClient(conn)
-	stream, err := client.Connect(streamCtx)
+	js, err := jetstream.New(nc)
 	if err != nil {
-		return 0, fmt.Errorf("open reverse stream: %w", err)
+		return fmt.Errorf("init jetstream: %w", err)
 	}
 
-	var sendMu sync.Mutex
-	sendMsg := func(msg *agentv1.AgentMessage) error {
-		sendMu.Lock()
-		defer sendMu.Unlock()
-		return stream.Send(msg)
-	}
+	connectedAtMs := time.Now().UnixMilli()
+	c.logger.Info("connected to NATS with JWT/NKey credentials",
+		"nats_addr", c.cfg.NATSAddr,
+		"node_id", nodeID,
+		"stream", c.cfg.StreamName,
+		"max_concurrency", cap(c.sem),
+		"version", Version,
+	)
 
-	caps := make([]agentv1.ProbeType, 0, len(c.cfg.Capabilities))
-	for _, capType := range c.cfg.Capabilities {
-		if pt := model.ProbeTypeToProto(capType); pt != agentv1.ProbeType_PROBE_TYPE_UNSPECIFIED {
-			caps = append(caps, pt)
+	// Control subscriptions: cancel, update, reconnect.
+	cancelSub, err := nc.Subscribe("ctrl.node."+safeID+".cancel", func(msg *natsgo.Msg) {
+		var cmd model.CancelTaskCommand
+		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
+			return
 		}
-	}
-
-	if err := sendMsg(&agentv1.AgentMessage{
-		Payload: &agentv1.AgentMessage_Register{
-			Register: &agentv1.RegisterRequest{
-				NodeId:         c.cfg.NodeID,
-				Name:           c.cfg.Name,
-				Region:         c.cfg.Region,
-				Group:          c.cfg.Group,
-				Asn:            c.cfg.ASN,
-				Ipv4:           c.cfg.IPv4,
-				Ipv6:           c.cfg.IPv6,
-				Capabilities:   caps,
-				MaxConcurrency: c.cfg.MaxConcurrency,
-				Version:        Version,
-				Labels:         c.cfg.Labels,
-			},
-		},
-	}); err != nil {
-		return 0, fmt.Errorf("send register: %w", err)
-	}
-
-	firstResp, err := stream.Recv()
-	if err != nil {
-		return 0, fmt.Errorf("recv register response: %w", err)
-	}
-	regResp := firstResp.GetRegisterResp()
-	if regResp == nil || !regResp.Accepted {
-		msg := "rejected by server"
-		if regResp != nil && regResp.Message != "" {
-			msg = regResp.Message
+		c.cancelMu.Lock()
+		cancelFn := c.cancels[cmd.SubtaskID]
+		c.cancelMu.Unlock()
+		if cancelFn != nil {
+			cancelFn()
 		}
-		return 0, errors.New(msg)
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe cancel ctrl: %w", err)
 	}
+	defer func() { _ = cancelSub.Unsubscribe() }()
 
+	updateSub, err := nc.Subscribe("ctrl.node."+safeID+".update", func(msg *natsgo.Msg) {
+		var cmd model.AgentUpdateCommand
+		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
+			return
+		}
+		go c.handleAgentUpdate(ctx, nodeID, &cmd, func(st model.AgentUpdateState) {
+			if payload, err := json.Marshal(st); err == nil {
+				_ = nc.Publish("agent.update."+safeID, payload)
+				_ = nc.Flush()
+			}
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe update ctrl: %w", err)
+	}
+	defer func() { _ = updateSub.Unsubscribe() }()
+
+	reconnectSub, err := nc.Subscribe("ctrl.node."+safeID+".reconnect", func(_ *natsgo.Msg) {
+		c.logger.Info("received reconnect command from control plane", "node_id", nodeID)
+		_ = nc.ForceReconnect()
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe reconnect ctrl: %w", err)
+	}
+	defer func() { _ = reconnectSub.Unsubscribe() }()
+
+	// Heartbeat loop (publish immediately on startup, then every heartbeat_interval_sec).
 	hbInterval := time.Duration(c.cfg.HeartbeatIntervalSec) * time.Second
-	if regResp.HeartbeatIntervalSec > 0 {
-		hbInterval = time.Duration(regResp.HeartbeatIntervalSec) * time.Second
-	}
 	if hbInterval < 2*time.Second {
 		hbInterval = 10 * time.Second
 	}
-
-	assignedNodeID := regResp.AssignedNodeId
-	if assignedNodeID == "" {
-		assignedNodeID = c.cfg.NodeID
+	publishHB := func() {
+		cpuPct, memPct := readSysMetrics()
+		hb := model.AgentHeartbeat{
+			NodeID:          nodeID,
+			IPv4:            c.cfg.IPv4,
+			IPv6:            c.cfg.IPv6,
+			Capabilities:    c.cfg.Capabilities,
+			MaxConcurrency:  uint32(cap(c.sem)),
+			ActiveTasks:     uint32(c.activeTasks.Load()),
+			CPUPercent:      cpuPct,
+			MemPercent:      memPct,
+			Version:         Version,
+			OS:              runtime.GOOS,
+			Arch:            runtime.GOARCH,
+			TimestampUnixMs: time.Now().UnixMilli(),
+			ConnectedAtMs:   connectedAtMs,
+			Labels:          c.cfg.Labels,
+		}
+		if payload, err := json.Marshal(hb); err == nil {
+			_ = nc.Publish("agent.hb."+safeID, payload)
+		}
 	}
+	publishHB()
 
-	c.logger.Info("connected to 11dog-server via reverse gRPC over WebSocket",
-		"server", wsURL,
-		"node_id", assignedNodeID,
-		"assigned_name", regResp.AssignedName,
-		"max_concurrency", regResp.AssignedMaxConcurrency,
-	)
-
-	// Heartbeat loop
 	go func() {
 		ticker := time.NewTicker(hbInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-streamCtx.Done():
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				cpuPct, memPct := readSysMetrics()
-				_ = sendMsg(&agentv1.AgentMessage{
-					Payload: &agentv1.AgentMessage_Heartbeat{
-						Heartbeat: &agentv1.Heartbeat{
-							NodeId:          assignedNodeID,
-							TimestampUnixMs: time.Now().UnixMilli(),
-							ActiveTasks:     uint32(c.activeTasks.Load()),
-							CpuPercent:      cpuPct,
-							MemPercent:      memPct,
-						},
-					},
-				})
+				publishHB()
 			}
 		}
 	}()
 
+	// JetStream Pull Consumer loop for this node's task subject.
+	consumerName := "node_" + safeID
+	filterSubj := "tasks.node." + safeID
+
 	for {
-		srvMsg, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return 0, errors.New("server closed stream")
-			}
-			return 0, err
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 
-		switch payload := srvMsg.Payload.(type) {
-		case *agentv1.ServerMessage_DispatchTask:
-			c.handleDispatch(streamCtx, assignedNodeID, payload.DispatchTask, sendMsg)
-
-		case *agentv1.ServerMessage_CancelTask:
-			if payload.CancelTask != nil {
-				c.cancelMu.Lock()
-				cancelFn := c.cancels[payload.CancelTask.SubtaskId]
-				c.cancelMu.Unlock()
-				if cancelFn != nil {
-					cancelFn()
-				}
+		consCtx, consCancel := context.WithTimeout(ctx, 5*time.Second)
+		consumer, err := js.CreateOrUpdateConsumer(consCtx, c.cfg.StreamName, jetstream.ConsumerConfig{
+			Durable:       consumerName,
+			FilterSubject: filterSubj,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			AckWait:       90 * time.Second,
+			MaxAckPending: cap(c.sem),
+			DeliverPolicy: jetstream.DeliverAllPolicy,
+		})
+		consCancel()
+		if err != nil {
+			c.logger.Warn("waiting for JetStream task stream/consumer", "stream", c.cfg.StreamName, "consumer", consumerName, "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+				continue
 			}
+		}
 
-		case *agentv1.ServerMessage_ServerDrain:
-			delay := 3 * time.Second
-			if payload.ServerDrain != nil && payload.ServerDrain.ReconnectAfterSec > 0 {
-				delay = time.Duration(payload.ServerDrain.ReconnectAfterSec) * time.Second
+		if err := c.consumeLoop(ctx, nc, consumer, nodeID); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			return delay, errors.New("server requested graceful drain")
+			c.logger.Warn("JetStream consume loop interrupted; retrying", "error", err)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
 		}
 	}
 }
 
-func (c *Client) handleDispatch(
-	streamCtx context.Context,
-	assignedNodeID string,
-	task *agentv1.DispatchTask,
-	sendMsg func(*agentv1.AgentMessage) error,
-) {
-	if task == nil {
-		return
+func (c *Client) consumeLoop(ctx context.Context, nc *natsgo.Conn, consumer jetstream.Consumer, nodeID string) error {
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, natsgo.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
+				continue
+			}
+			return err
+		}
+		for msg := range msgs.Messages() {
+			var subtask mq.QueuedSubtask
+			if err := json.Unmarshal(msg.Data(), &subtask); err != nil {
+				_ = msg.Term()
+				continue
+			}
+			c.handleSubtask(ctx, nc, nodeID, &subtask, msg)
+		}
 	}
-	if task.DeadlineUnixMs > 0 && time.Now().UnixMilli() > task.DeadlineUnixMs {
-		_ = sendMsg(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_TaskResult{
-				TaskResult: &agentv1.TaskResult{
-					TaskId:         task.TaskId,
-					SubtaskId:      task.SubtaskId,
-					NodeId:         assignedNodeID,
-					Type:           task.Type,
-					Status:         agentv1.TaskStatus_TASK_STATUS_EXPIRED,
-					ErrorMessage:   "task deadline expired before execution",
-					FinishedUnixMs: time.Now().UnixMilli(),
-				},
+}
+
+func publishTaskEvent(nc *natsgo.Conn, ev *model.TaskEvent) {
+	if payload, err := json.Marshal(ev); err == nil {
+		_ = nc.Publish("results.task."+natsauth.SanitizeSubjectToken(ev.TaskID), payload)
+	}
+}
+
+func (c *Client) handleSubtask(
+	parentCtx context.Context,
+	nc *natsgo.Conn,
+	nodeID string,
+	subtask *mq.QueuedSubtask,
+	msg jetstream.Msg,
+) {
+	if !subtask.Deadline.IsZero() && time.Now().After(subtask.Deadline) {
+		publishTaskEvent(nc, &model.TaskEvent{
+			EventType: "result",
+			TaskID:    subtask.TaskID,
+			SubtaskID: subtask.SubtaskID,
+			NodeID:    nodeID,
+			Type:      subtask.Type,
+			Status:    model.StatusExpired,
+			Result: &model.NodeTaskResult{
+				TaskID:         subtask.TaskID,
+				SubtaskID:      subtask.SubtaskID,
+				NodeID:         nodeID,
+				Type:           subtask.Type,
+				Status:         model.StatusExpired,
+				ErrorMessage:   "task deadline expired before execution",
+				FinishedUnixMs: time.Now().UnixMilli(),
 			},
 		})
+		_ = msg.Ack()
 		return
 	}
 
@@ -318,32 +353,39 @@ func (c *Client) handleDispatch(
 	select {
 	case c.sem <- struct{}{}:
 	default:
-		_ = sendMsg(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_TaskAck{
-				TaskAck: &agentv1.TaskAck{
-					TaskId:       task.TaskId,
-					SubtaskId:    task.SubtaskId,
-					Accepted:     false,
-					RejectReason: "节点繁忙，请稍后再试",
-				},
+		publishTaskEvent(nc, &model.TaskEvent{
+			EventType: "result",
+			TaskID:    subtask.TaskID,
+			SubtaskID: subtask.SubtaskID,
+			NodeID:    nodeID,
+			Type:      subtask.Type,
+			Status:    model.StatusOverloaded,
+			Result: &model.NodeTaskResult{
+				TaskID:         subtask.TaskID,
+				SubtaskID:      subtask.SubtaskID,
+				NodeID:         nodeID,
+				Type:           subtask.Type,
+				Status:         model.StatusOverloaded,
+				ErrorMessage:   "节点繁忙，请稍后再试",
+				FinishedUnixMs: time.Now().UnixMilli(),
 			},
 		})
+		_ = msg.Ack()
 		return
 	}
 
-	_ = sendMsg(&agentv1.AgentMessage{
-		Payload: &agentv1.AgentMessage_TaskAck{
-			TaskAck: &agentv1.TaskAck{
-				TaskId:    task.TaskId,
-				SubtaskId: task.SubtaskId,
-				Accepted:  true,
-			},
-		},
+	publishTaskEvent(nc, &model.TaskEvent{
+		EventType: "progress",
+		TaskID:    subtask.TaskID,
+		SubtaskID: subtask.SubtaskID,
+		NodeID:    nodeID,
+		Type:      subtask.Type,
+		Status:    model.StatusRunning,
 	})
 
-	taskCtx, taskCancel := context.WithCancel(streamCtx)
+	taskCtx, taskCancel := context.WithCancel(parentCtx)
 	c.cancelMu.Lock()
-	c.cancels[task.SubtaskId] = taskCancel
+	c.cancels[subtask.SubtaskID] = taskCancel
 	c.cancelMu.Unlock()
 	c.activeTasks.Add(1)
 
@@ -351,71 +393,48 @@ func (c *Client) handleDispatch(
 		defer func() {
 			taskCancel()
 			c.cancelMu.Lock()
-			delete(c.cancels, task.SubtaskId)
+			delete(c.cancels, subtask.SubtaskID)
 			c.cancelMu.Unlock()
 			c.activeTasks.Add(-1)
 			<-c.sem
+			_ = msg.Ack()
 		}()
-
-		probeType := model.ProbeTypeFromProto(task.Type)
-		params := model.ProbeParamsFromProto(task.Params)
 
 		onProgress := func(p *model.ProgressPayload) {
 			if p == nil {
 				return
 			}
-			pb := &agentv1.TaskProgress{
-				TaskId:    task.TaskId,
-				SubtaskId: task.SubtaskId,
-				NodeId:    assignedNodeID,
-				Type:      task.Type,
-			}
-			if p.PingPacket != nil {
-				pb.Progress = &agentv1.TaskProgress_PingPacket{
-					PingPacket: &agentv1.PingPacket{
-						Seq:     p.PingPacket.Seq,
-						RttMs:   p.PingPacket.RTTMs,
-						Ttl:     p.PingPacket.TTL,
-						Timeout: p.PingPacket.Timeout,
-						ReplyIp: p.PingPacket.ReplyIP,
-					},
-				}
-			} else if p.TracerouteHop != nil {
-				pb.Progress = &agentv1.TaskProgress_TracerouteHop{
-					TracerouteHop: &agentv1.TracerouteHop{
-						Hop:         p.TracerouteHop.Hop,
-						Ip:          p.TracerouteHop.IP,
-						Hostname:    p.TracerouteHop.Hostname,
-						RttsMs:      p.TracerouteHop.RTTsMs,
-						AvgRttMs:    p.TracerouteHop.AvgRTTMs,
-						LossPercent: p.TracerouteHop.LossPercent,
-						Timeout:     p.TracerouteHop.Timeout,
-					},
-				}
-			}
-			_ = sendMsg(&agentv1.AgentMessage{
-				Payload: &agentv1.AgentMessage_TaskProgress{
-					TaskProgress: pb,
-				},
+			publishTaskEvent(nc, &model.TaskEvent{
+				EventType: "progress",
+				TaskID:    subtask.TaskID,
+				SubtaskID: subtask.SubtaskID,
+				NodeID:    nodeID,
+				Type:      subtask.Type,
+				Status:    model.StatusRunning,
+				Progress:  p,
 			})
 		}
 
 		res := probe.Run(
 			taskCtx,
-			task.TaskId,
-			task.SubtaskId,
-			assignedNodeID,
-			probeType,
-			task.Target,
-			task.TimeoutMs,
-			params,
+			subtask.TaskID,
+			subtask.SubtaskID,
+			nodeID,
+			subtask.Type,
+			subtask.Target,
+			subtask.TimeoutMs,
+			subtask.Params,
 			onProgress,
 		)
 
-		_ = sendMsg(&agentv1.AgentMessage{
-			Payload: &agentv1.AgentMessage_TaskResult{
-				TaskResult: model.TaskResultToProto(res),
-			},
+		publishTaskEvent(nc, &model.TaskEvent{
+			EventType: "result",
+			TaskID:    subtask.TaskID,
+			SubtaskID: subtask.SubtaskID,
+			NodeID:    nodeID,
+			Type:      subtask.Type,
+			Status:    res.Status,
+			Result:    res,
 		})
 	}()
 }

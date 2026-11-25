@@ -1,10 +1,7 @@
 VERSION ?= 1.0.0
 LDFLAGS := -s -w -X github.com/11dog/11dog/internal/server.Version=$(VERSION) -X github.com/11dog/11dog/internal/agent.Version=$(VERSION)
 
-.PHONY: proto web build-server build-agent build-agent-linux test helm-lint clean
-
-proto:
-	cd proto && buf lint && buf generate
+.PHONY: web build-server build-agent build-agent-linux test helm-lint clean
 
 web:
 	cd web && npm install && npm run build

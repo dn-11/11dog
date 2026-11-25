@@ -4,12 +4,17 @@ import {
   createAdminNode,
   deleteAdminNode,
   disconnectAdminNode,
+  fetchAdminNATSConfig,
   fetchAdminNodes,
   fetchAdminOverview,
+  fetchAdminTargetPolicy,
   rotateAdminNodeToken,
-  updateAdminNode
+  triggerAdminBatchUpdate,
+  triggerAdminNodeUpdate,
+  updateAdminNode,
+  updateAdminTargetPolicy
 } from '@/api/client'
-import type { AdminNodeInfo, AdminOverview } from '@/types/api'
+import type { AdminNATSConfigResponse, AdminNodeInfo, AdminOverview, TargetPolicy } from '@/types/api'
 
 const TOKEN_STORAGE_KEY = '11dog_admin_token'
 
@@ -51,23 +56,48 @@ const editForm = ref({
 
 // Hosted Install Script Modal state
 const deployNode = ref<AdminNodeInfo | null>(null)
-const deployWSAddr = ref('')
+const deployNATSAddr = ref('')
+
+// NATS Server Config Export Modal state
+const showNATSConfigModal = ref(false)
+const natsConfigData = ref<AdminNATSConfigResponse | null>(null)
+
+// Agent Self-Update Modal state
+const showUpdateModal = ref(false)
+const updateTargetNode = ref<AdminNodeInfo | null>(null) // null = batch all online nodes
+const updateForm = ref({
+  version: '',
+  download_url: '',
+  sha256: '',
+  force: false
+})
+const updatingPush = ref(false)
+
+// Global Target Restriction Policy state
+const targetPolicy = ref<TargetPolicy>({
+  enabled: false,
+  allow_rules: [],
+  deny_rules: []
+})
+const policyEnabled = ref(false)
+const policyAllowText = ref('')
+const policyDenyText = ref('')
+const policyDirty = ref(false)
+const policySaving = ref(false)
 
 let refreshTimer: number | undefined
 
-function defaultWSAgentAddr(): string {
-  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsPath = overview.value?.ws_path || '/api/v1/agent/ws'
-  return `${wsProto}//${window.location.host}${wsPath}`
+function defaultNATSAddr(): string {
+  return overview.value?.public_nats_url || overview.value?.nats_url || `nats://${window.location.hostname}:4222`
 }
 
 const installCmd = computed(() => {
   if (!deployNode.value?.token) return ''
   const origin = window.location.origin
-  const addr = deployWSAddr.value.trim() || defaultWSAgentAddr()
+  const addr = deployNATSAddr.value.trim() || defaultNATSAddr()
   const params = new URLSearchParams({
     token: deployNode.value.token,
-    ws: addr
+    nats: addr
   })
   return `curl -fsSL "${origin}/scripts/install.sh?${params.toString()}" | sudo bash`
 })
@@ -77,10 +107,11 @@ const uninstallCmd = computed(() => {
 })
 
 const minimalAgentYaml = computed(() => {
-  if (!deployNode.value?.token) return ''
-  const addr = deployWSAddr.value.trim() || defaultWSAgentAddr()
-  return `server_addr: "${addr}"
-token: "${deployNode.value.token}"
+  if (!deployNode.value) return ''
+  const addr = deployNATSAddr.value.trim() || defaultNATSAddr()
+  return `nats_addr: "${addr}"
+creds_file: "/etc/11dog/agent.creds"
+max_concurrency: ${deployNode.value.max_concurrency || 8}
 heartbeat_interval_sec: 10`
 })
 
@@ -88,14 +119,24 @@ async function loadData(token: string): Promise<boolean> {
   loading.value = true
   authError.value = ''
   try {
-    const [ov, nodeList] = await Promise.all([fetchAdminOverview(token), fetchAdminNodes(token)])
+    const [ov, nodeList, pol] = await Promise.all([
+      fetchAdminOverview(token),
+      fetchAdminNodes(token),
+      fetchAdminTargetPolicy(token)
+    ])
     overview.value = ov
     nodes.value = nodeList
+    targetPolicy.value = pol
+    if (!policyDirty.value) {
+      policyEnabled.value = pol.enabled
+      policyAllowText.value = (pol.allow_rules ?? []).join('\n')
+      policyDenyText.value = (pol.deny_rules ?? []).join('\n')
+    }
     authenticated.value = true
     adminToken.value = token
     sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
-    if (!deployWSAddr.value) {
-      deployWSAddr.value = ov.public_ws_addr || defaultWSAgentAddr()
+    if (!deployNATSAddr.value) {
+      deployNATSAddr.value = ov.public_nats_url || ov.nats_url || defaultNATSAddr()
     }
     return true
   } catch (err) {
@@ -198,26 +239,36 @@ async function submitEditNode() {
 
 function openDeployModal(n: AdminNodeInfo) {
   deployNode.value = n
-  if (overview.value?.public_ws_addr) {
-    deployWSAddr.value = overview.value.public_ws_addr
-  } else if (!deployWSAddr.value) {
-    deployWSAddr.value = defaultWSAgentAddr()
+  if (overview.value?.public_nats_url) {
+    deployNATSAddr.value = overview.value.public_nats_url
+  } else if (!deployNATSAddr.value) {
+    deployNATSAddr.value = defaultNATSAddr()
+  }
+}
+
+async function openNATSConfigModal() {
+  actionErr.value = ''
+  try {
+    natsConfigData.value = await fetchAdminNATSConfig(adminToken.value)
+    showNATSConfigModal.value = true
+  } catch (err) {
+    actionErr.value = err instanceof Error ? err.message : '获取 NATS 配置失败'
   }
 }
 
 async function handleRotateToken(n: AdminNodeInfo) {
-  if (!window.confirm(`确定要重置节点「${n.name} (${n.id})」的通信 Token 吗？旧 Token 将立即失效！`)) {
+  if (!window.confirm(`确定要为节点「${n.name} (${n.id})」重新签发 NATS .creds 凭据吗？`)) {
     return
   }
   actionErr.value = ''
   actionMsg.value = ''
   try {
     const updated = await rotateAdminNodeToken(adminToken.value, n.id)
-    actionMsg.value = `节点 ${n.id} Token 已重置并断开旧会话`
+    actionMsg.value = `节点 ${n.id} 已签发新的 NATS .creds 凭据`
     await loadData(adminToken.value)
     openDeployModal(updated)
   } catch (err) {
-    actionErr.value = err instanceof Error ? err.message : '重置 Token 失败'
+    actionErr.value = err instanceof Error ? err.message : '重新签发凭据失败'
   }
 }
 
@@ -247,6 +298,119 @@ async function handleDelete(n: AdminNodeInfo) {
     await loadData(adminToken.value)
   } catch (err) {
     actionErr.value = err instanceof Error ? err.message : '删除失败'
+  }
+}
+
+function openUpdateModal(n: AdminNodeInfo | null) {
+  actionErr.value = ''
+  updateTargetNode.value = n
+  updateForm.value = {
+    version: overview.value?.version || '',
+    download_url: '',
+    sha256: '',
+    force: false
+  }
+  showUpdateModal.value = true
+}
+
+async function submitAgentUpdate() {
+  actionErr.value = ''
+  actionMsg.value = ''
+  updatingPush.value = true
+  try {
+    const payload = {
+      version: updateForm.value.version.trim() || undefined,
+      download_url: updateForm.value.download_url.trim() || undefined,
+      sha256: updateForm.value.sha256.trim() || undefined,
+      force: updateForm.value.force
+    }
+    if (updateTargetNode.value) {
+      const target = updateTargetNode.value
+      const res = await triggerAdminNodeUpdate(adminToken.value, target.id, payload)
+      actionMsg.value = `已向节点「${target.name} (${target.id})」下发更新指令：${res.message || '成功'}`
+    } else {
+      const resp = await triggerAdminBatchUpdate(adminToken.value, payload)
+      const failed = resp.results.filter((r) => !r.sent)
+      if (failed.length > 0) {
+        actionMsg.value = `批量更新已下发：成功 ${resp.sent} / ${resp.total} 个节点（失败 ${failed.length} 个）`
+      } else {
+        actionMsg.value = `已向全部 ${resp.sent} 个在线节点下发更新指令`
+      }
+    }
+    showUpdateModal.value = false
+    setTimeout(() => {
+      void loadData(adminToken.value)
+    }, 600)
+  } catch (err) {
+    actionErr.value = err instanceof Error ? err.message : '下发更新失败'
+  } finally {
+    updatingPush.value = false
+  }
+}
+
+function parseRuleLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith('#'))
+}
+
+async function saveTargetPolicy() {
+  actionErr.value = ''
+  actionMsg.value = ''
+  policySaving.value = true
+  try {
+    const updated = await updateAdminTargetPolicy(adminToken.value, {
+      enabled: policyEnabled.value,
+      allow_rules: parseRuleLines(policyAllowText.value),
+      deny_rules: parseRuleLines(policyDenyText.value)
+    })
+    targetPolicy.value = updated
+    policyEnabled.value = updated.enabled
+    policyAllowText.value = (updated.allow_rules ?? []).join('\n')
+    policyDenyText.value = (updated.deny_rules ?? []).join('\n')
+    policyDirty.value = false
+    actionMsg.value = updated.enabled
+      ? `全局目标限制已保存至数据库并刷新内存缓存（允许 ${updated.allow_rules.length} 条，禁止 ${updated.deny_rules.length} 条）`
+      : '全局目标限制已关闭并保存至数据库'
+  } catch (err) {
+    actionErr.value = err instanceof Error ? err.message : '保存目标限制策略失败'
+  } finally {
+    policySaving.value = false
+  }
+}
+
+function updateStateBadgeClass(state?: string): string {
+  switch (state) {
+    case 'failed':
+      return 'badge-red'
+    case 'up_to_date':
+      return 'badge-green'
+    case 'restarting':
+      return 'badge-purple'
+    default:
+      return 'badge-amber'
+  }
+}
+
+function updateStateLabel(state?: string): string {
+  switch (state) {
+    case 'pending':
+      return '等待更新'
+    case 'downloading':
+      return '下载中'
+    case 'verifying':
+      return '校验中'
+    case 'applying':
+      return '替换中'
+    case 'restarting':
+      return '重启中'
+    case 'up_to_date':
+      return '已是最新'
+    case 'failed':
+      return '更新失败'
+    default:
+      return state || ''
   }
 }
 
@@ -326,13 +490,16 @@ onUnmounted(() => {
           <span v-if="overview" class="badge badge-blue mono">Ver: {{ overview.version }}</span>
           <span v-if="overview" class="badge badge-green mono">DB: {{ overview.db_driver.toUpperCase() }}</span>
           <span v-if="overview" class="badge badge-purple mono">
-            MQ: {{ overview.mq_driver.toUpperCase() }} ({{ overview.max_queue_per_node }}/节点)
+            NATS: {{ overview.public_nats_url || overview.nats_url }} ({{ overview.max_queue_per_node }}/节点)
           </span>
-          <span v-if="overview" class="badge badge-slate mono">
-            WS: {{ overview.public_ws_addr || overview.ws_path }}
+          <span v-if="overview?.nats_account_pub" class="badge badge-slate mono">
+            Acc: {{ overview.nats_account_pub.slice(0, 12) }}…
           </span>
         </div>
         <div class="header-actions">
+          <button type="button" class="btn btn-outline btn-sm" @click="openNATSConfigModal">
+            导出 NATS 配置
+          </button>
           <button type="button" class="btn btn-success btn-sm" @click="openCreateModal">
             + 新增节点
           </button>
@@ -394,6 +561,71 @@ onUnmounted(() => {
             <span v-if="!overview.hosted_binaries?.length" class="badge badge-amber">
               未检测到托管的 Agent 二进制文件（请构建放入 agent_bin_dir）
             </span>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="overview.online_nodes === 0"
+              @click="openUpdateModal(null)"
+            >
+              批量下发 Agent 更新
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Global Target Restriction Policy Card -->
+      <div class="card">
+        <div class="card-header">
+          <div class="admin-title-group">
+            <span>全局测试目标限制（域名通配符 / CIDR）</span>
+            <span class="badge" :class="targetPolicy.enabled ? 'badge-green' : 'badge-slate'">
+              {{ targetPolicy.enabled ? '已启用（内存缓存生效）' : '未启用' }}
+            </span>
+          </div>
+          <div class="header-actions">
+            <span v-if="targetPolicy.updated_at_ms" class="mono text-muted">
+              上次更新: {{ formatTime(targetPolicy.updated_at_ms) }}
+            </span>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="policySaving"
+              @click="saveTargetPolicy"
+            >
+              {{ policySaving ? '保存中...' : '保存策略' }}
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <label class="field-check" style="margin-bottom: 12px">
+            <input
+              v-model="policyEnabled"
+              type="checkbox"
+              @change="policyDirty = true"
+            />
+            <span>启用全局测试目标限制（持久化保存在数据库并实时缓存于内存；禁止列表优先于允许列表）</span>
+          </label>
+          <div class="form-grid">
+            <label class="field-item">
+              <span>允许列表（Allow Rules，每行一条；留空表示允许除禁止列表外的所有目标）</span>
+              <textarea
+                v-model="policyAllowText"
+                rows="4"
+                class="policy-textarea mono"
+                placeholder="例如：&#10;172.16.0.0/16&#10;fd00::/48&#10;*.dn11.org&#10;example.com"
+                @input="policyDirty = true"
+              ></textarea>
+            </label>
+            <label class="field-item">
+              <span>禁止列表（Deny Rules，每行一条；优先拦截匹配的 IP / CIDR / 域名通配符）</span>
+              <textarea
+                v-model="policyDenyText"
+                rows="4"
+                class="policy-textarea mono"
+                placeholder="例如：&#10;127.0.0.0/8&#10;169.254.0.0/16&#10;*.internal.local"
+                @input="policyDirty = true"
+              ></textarea>
+            </label>
           </div>
         </div>
       </div>
@@ -474,7 +706,21 @@ onUnmounted(() => {
                 </td>
                 <td class="mono text-sm">{{ n.cpu_percent.toFixed(1) }}% / {{ n.mem_percent.toFixed(1) }}%</td>
                 <td class="mono text-sm">
-                  <div>{{ n.version || '-' }}</div>
+                  <div>
+                    {{ n.version || '-' }}
+                    <span v-if="n.os || n.arch" class="text-muted">
+                      ({{ n.os || '?' }}/{{ n.arch || '?' }})
+                    </span>
+                  </div>
+                  <div v-if="n.update_status" style="margin-top: 2px">
+                    <span
+                      class="badge"
+                      :class="updateStateBadgeClass(n.update_status.state)"
+                      :title="n.update_status.message || ''"
+                    >
+                      {{ updateStateLabel(n.update_status.state) }}
+                    </span>
+                  </div>
                   <div class="text-muted">{{ formatTime(n.last_seen_unix_ms) }}</div>
                 </td>
                 <td>
@@ -482,11 +728,19 @@ onUnmounted(() => {
                     <button type="button" class="btn btn-primary btn-sm" @click="openDeployModal(n)">
                       部署脚本
                     </button>
+                    <button
+                      v-if="n.status === 'online'"
+                      type="button"
+                      class="btn btn-success btn-sm"
+                      @click="openUpdateModal(n)"
+                    >
+                      更新
+                    </button>
                     <button type="button" class="btn btn-outline btn-sm" @click="openEditModal(n)">
                       编辑
                     </button>
                     <button type="button" class="btn btn-outline btn-sm" @click="handleRotateToken(n)">
-                      重置Token
+                      重签Creds
                     </button>
                     <button
                       v-if="n.status === 'online'"
@@ -618,19 +872,19 @@ onUnmounted(() => {
           </div>
           <div class="card-body">
             <p class="deploy-hint">
-              节点身份（名称、区域、ASN、并发配额）已固定在服务端数据库，Agent 仅凭通信 Token 反连鉴权；后续在后台编辑节点资料即可实时生效。
+              Agent 使用服务端签发的 NATS JWT/NKey 凭据（<code class="mono">.creds</code>）直连 NATS，Broker 原生强制隔离每个节点的 Subject 权限。
             </p>
 
             <div class="form-grid" style="margin-bottom: 12px">
               <label class="field-item full-span">
-                <span>反连 WebSocket 地址 (ws:// 或 wss://)</span>
-                <input v-model="deployWSAddr" type="text" class="mono" />
+                <span>NATS 连接地址（nats://、tls:// 或 wss://）</span>
+                <input v-model="deployNATSAddr" type="text" class="mono" />
               </label>
             </div>
 
             <div class="code-section">
               <div class="code-head">
-                <span>1. 一键安装命令（托管在 11Dog 服务端，自动配置 systemd）</span>
+                <span>1. 一键安装命令（托管在 11Dog 服务端，自动写入 .creds 与 systemd）</span>
                 <button type="button" class="btn btn-primary btn-sm" @click="copyText('安装命令', installCmd)">
                   复制安装命令
                 </button>
@@ -640,12 +894,12 @@ onUnmounted(() => {
 
             <div class="code-section">
               <div class="code-head">
-                <span>2. 节点专属通信 Token</span>
-                <button type="button" class="btn btn-outline btn-sm" @click="copyText('Token', deployNode.token || '')">
-                  复制 Token
+                <span>2. 节点专属 NATS .creds 凭据 (/etc/11dog/agent.creds)</span>
+                <button type="button" class="btn btn-outline btn-sm" @click="copyText('NATS .creds', deployNode.creds || '')">
+                  复制 .creds
                 </button>
               </div>
-              <pre class="mono guide-pre">{{ deployNode.token }}</pre>
+              <pre class="mono guide-pre">{{ deployNode.creds || '未签发，请点击重签Creds' }}</pre>
             </div>
 
             <div class="code-section">
@@ -668,6 +922,88 @@ onUnmounted(() => {
               <pre class="mono guide-pre">{{ uninstallCmd }}</pre>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- NATS Server Config Export Modal -->
+      <div v-if="showNATSConfigModal && natsConfigData" class="modal-backdrop" @click.self="showNATSConfigModal = false">
+        <div class="card modal-card wide">
+          <div class="card-header">
+            <span>导出 NATS Server 配置（nats-server.conf）</span>
+            <div class="header-actions">
+              <span v-if="copiedTip" class="badge badge-green">{{ copiedTip }}</span>
+              <button type="button" class="btn btn-outline btn-sm" @click="showNATSConfigModal = false">关闭</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <p class="deploy-hint">
+              将以下配置保存为 <code class="mono">nats-server.conf</code> 并启动 <code class="mono">nats-server -c nats-server.conf</code>，NATS 即可直接校验本平台签发的所有 Agent <code class="mono">.creds</code> 凭据。
+            </p>
+            <div class="code-section" style="margin-bottom: 0">
+              <div class="code-head">
+                <span>Operator: {{ natsConfigData.operator_pub.slice(0, 14) }}… · Account: {{ natsConfigData.account_pub.slice(0, 14) }}…</span>
+                <button type="button" class="btn btn-primary btn-sm" @click="copyText('nats-server.conf', natsConfigData.config)">
+                  复制 nats-server.conf
+                </button>
+              </div>
+              <pre class="mono guide-pre">{{ natsConfigData.config }}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agent Self-Update Modal -->
+      <div v-if="showUpdateModal" class="modal-backdrop" @click.self="showUpdateModal = false">
+        <div class="card modal-card">
+          <div class="card-header">
+            <span>
+              {{
+                updateTargetNode
+                  ? `下发 Agent 更新：${updateTargetNode.name} (${updateTargetNode.id})`
+                  : '批量下发 Agent 更新（全部在线节点）'
+              }}
+            </span>
+            <button type="button" class="btn btn-outline btn-sm" @click="showUpdateModal = false">关闭</button>
+          </div>
+          <form class="card-body modal-form" @submit.prevent="submitAgentUpdate">
+            <p class="deploy-hint">
+              留空下载地址时，服务端将自动根据每个节点的 OS/Arch 匹配托管目录（<code class="mono">/downloads/11dog-agent-&lt;os&gt;-&lt;arch&gt;</code>）并自动计算 SHA-256 校验值下发。
+            </p>
+            <div class="form-grid">
+              <label class="field-item full-span">
+                <span>目标版本号（留空默认服务端版本 {{ overview?.version || '-' }}）</span>
+                <input v-model="updateForm.version" type="text" class="mono" placeholder="例如：1.1.0" />
+              </label>
+              <label class="field-item full-span">
+                <span>自定义下载地址（可选，留空自动使用托管二进制）</span>
+                <input
+                  v-model="updateForm.download_url"
+                  type="text"
+                  class="mono"
+                  placeholder="例如：https://example.com/11dog-agent-linux-amd64"
+                />
+              </label>
+              <label class="field-item full-span">
+                <span>SHA-256 校验值（可选，托管二进制自动计算）</span>
+                <input
+                  v-model="updateForm.sha256"
+                  type="text"
+                  class="mono"
+                  placeholder="64 位十六进制 SHA-256"
+                />
+              </label>
+              <label class="field-check full-span">
+                <input v-model="updateForm.force" type="checkbox" />
+                <span>强制更新（即使 Agent 当前版本与目标版本一致也重新下载替换并重启）</span>
+              </label>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline btn-sm" @click="showUpdateModal = false">取消</button>
+              <button type="submit" class="btn btn-primary btn-sm" :disabled="updatingPush">
+                {{ updatingPush ? '下发中...' : '确认下发更新' }}
+              </button>
+            </div>
+          </form>
         </div>
       </div>
     </template>
@@ -877,12 +1213,23 @@ onUnmounted(() => {
   grid-column: 1 / -1;
 }
 
-.field-item input {
+.field-item input,
+.policy-textarea {
   border: 1px solid var(--border-strong);
   border-radius: 5px;
   padding: 7px 10px;
   font-size: 13px;
   color: var(--text-primary);
+}
+
+.policy-textarea {
+  resize: vertical;
+  line-height: 1.5;
+  font-size: 12px;
+}
+
+.field-check.full-span {
+  grid-column: 1 / -1;
 }
 
 .field-check {

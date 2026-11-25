@@ -10,37 +10,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// AgentConfig holds all configuration for a pure-binary 11dog edge agent.
+// AgentConfig holds all configuration for a pure-binary 11dog edge agent connecting directly to NATS.
 type AgentConfig struct {
-	ServerAddr            string            `yaml:"server_addr"`
-	Token                 string            `yaml:"token"`
+	NATSAddr              string            `yaml:"nats_addr"`
+	CredsFile             string            `yaml:"creds_file"`
+	Creds                 string            `yaml:"creds,omitempty"`
+	StreamName            string            `yaml:"stream_name"`
 	TLSInsecureSkipVerify bool              `yaml:"tls_insecure_skip_verify"`
 	TLSCAFile             string            `yaml:"tls_ca_file"`
-	NodeID                string            `yaml:"node_id"`
-	Name                  string            `yaml:"name"`
-	Region                string            `yaml:"region"`
-	Group                 string            `yaml:"group"`
-	ASN                   uint32            `yaml:"asn"`
-	IPv4                  string            `yaml:"ipv4"`
-	IPv6                  string            `yaml:"ipv6"`
+	NodeID                string            `yaml:"node_id,omitempty"`
+	IPv4                  string            `yaml:"ipv4,omitempty"`
+	IPv6                  string            `yaml:"ipv6,omitempty"`
 	MaxConcurrency        uint32            `yaml:"max_concurrency"`
 	HeartbeatIntervalSec  uint32            `yaml:"heartbeat_interval_sec"`
 	Capabilities          []model.ProbeType `yaml:"capabilities"`
-	Labels                map[string]string `yaml:"labels"`
+	Labels                map[string]string `yaml:"labels,omitempty"`
 }
 
 // DefaultAgentConfig returns sensible defaults for an edge probe agent.
 func DefaultAgentConfig() *AgentConfig {
-	hostname, _ := os.Hostname()
-	if hostname == "" {
-		hostname = "dn11-node"
-	}
 	return &AgentConfig{
-		ServerAddr:           "ws://127.0.0.1:8080/api/v1/agent/ws",
-		NodeID:               hostname,
-		Name:                 hostname,
-		Region:               "DN11",
-		Group:                "Default",
+		NATSAddr:             "nats://127.0.0.1:4222",
+		CredsFile:            "/etc/11dog/agent.creds",
+		StreamName:           "DOG_TASKS",
 		MaxConcurrency:       8,
 		HeartbeatIntervalSec: 10,
 		Capabilities: []model.ProbeType{
@@ -67,21 +59,11 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 		}
 	}
 	applyAgentEnvOverrides(cfg)
-	if cfg.NodeID == "" {
-		hostname, _ := os.Hostname()
-		if hostname == "" {
-			hostname = "dn11-node"
-		}
-		cfg.NodeID = hostname
+	if cfg.NATSAddr == "" {
+		cfg.NATSAddr = "nats://127.0.0.1:4222"
 	}
-	if cfg.Name == "" {
-		cfg.Name = cfg.NodeID
-	}
-	if cfg.Region == "" {
-		cfg.Region = "DN11"
-	}
-	if cfg.Group == "" {
-		cfg.Group = "Default"
+	if cfg.StreamName == "" {
+		cfg.StreamName = "DOG_TASKS"
 	}
 	if cfg.MaxConcurrency == 0 {
 		cfg.MaxConcurrency = 8
@@ -96,34 +78,26 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 }
 
 func applyAgentEnvOverrides(cfg *AgentConfig) {
-	if v := os.Getenv("DOG_SERVER_ADDR"); v != "" {
-		cfg.ServerAddr = v
+	if v := os.Getenv("DOG_NATS_ADDR"); v != "" {
+		cfg.NATSAddr = strings.TrimSpace(v)
 	}
-	if v := os.Getenv("DOG_TOKEN"); v != "" {
-		cfg.Token = v
+	if v := os.Getenv("DOG_NATS_CREDS_FILE"); v != "" {
+		cfg.CredsFile = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_CREDS"); v != "" {
+		cfg.Creds = v
+	}
+	if v := os.Getenv("DOG_NATS_STREAM_NAME"); v != "" {
+		cfg.StreamName = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_TLS_INSECURE"); v != "" {
 		cfg.TLSInsecureSkipVerify = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("DOG_TLS_CA_FILE"); v != "" {
-		cfg.TLSCAFile = v
+		cfg.TLSCAFile = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_NODE_ID"); v != "" {
-		cfg.NodeID = v
-	}
-	if v := os.Getenv("DOG_NODE_NAME"); v != "" {
-		cfg.Name = v
-	}
-	if v := os.Getenv("DOG_REGION"); v != "" {
-		cfg.Region = v
-	}
-	if v := os.Getenv("DOG_GROUP"); v != "" {
-		cfg.Group = v
-	}
-	if v := os.Getenv("DOG_ASN"); v != "" {
-		if n, err := strconv.ParseUint(v, 10, 32); err == nil {
-			cfg.ASN = uint32(n)
-		}
+		cfg.NodeID = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_MAX_CONCURRENCY"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {

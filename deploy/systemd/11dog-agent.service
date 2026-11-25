@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=11dog
 Group=11dog
-ExecStart=/usr/local/bin/11dog-agent --config /etc/11dog/agent.yaml
+ExecStart=/opt/11dog/11dog-agent --config /etc/11dog/agent.yaml
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=0
@@ -26,6 +26,7 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 ReadOnlyPaths=/etc/11dog
+ReadWritePaths=/opt/11dog
 LimitNOFILE=65535
 
 [Install]

@@ -33,6 +33,13 @@ export interface MetaInfo {
   online_nodes: number
 }
 
+export interface AgentUpdateState {
+  target_version?: string
+  state: 'pending' | 'downloading' | 'verifying' | 'applying' | 'restarting' | 'up_to_date' | 'failed' | string
+  message?: string
+  updated_at_ms?: number
+}
+
 export interface AdminNodeInfo {
   id: string
   name: string
@@ -48,15 +55,46 @@ export interface AdminNodeInfo {
   cpu_percent: number
   mem_percent: number
   version: string
+  os?: string
+  arch?: string
+  update_status?: AgentUpdateState
   status: 'online' | 'offline'
   enabled: boolean
   notes?: string
   token?: string
+  creds?: string
   created_at_ms?: number
   updated_at_ms?: number
   last_seen_unix_ms: number
   connected_at_unix_ms?: number
   labels?: Record<string, string>
+}
+
+export interface AdminTriggerUpdateRequest {
+  node_ids?: string[]
+  version?: string
+  download_url?: string
+  sha256?: string
+  force?: boolean
+}
+
+export interface AdminUpdateNodeResult {
+  node_id: string
+  sent: boolean
+  message?: string
+}
+
+export interface AdminBatchUpdateResponse {
+  results: AdminUpdateNodeResult[]
+  total: number
+  sent: number
+}
+
+export interface TargetPolicy {
+  enabled: boolean
+  allow_rules: string[]
+  deny_rules: string[]
+  updated_at_ms?: number
 }
 
 export interface AdminCreateNodeRequest {
@@ -82,10 +120,10 @@ export interface AdminUpdateNodeRequest {
 export interface AdminOverview {
   version: string
   db_driver: string
-  mq_driver: string
+  nats_url: string
+  public_nats_url?: string
+  nats_account_pub?: string
   max_queue_per_node: number
-  ws_path: string
-  public_ws_addr?: string
   agent_download_base_url?: string
   hosted_binaries: string[]
   online_nodes: number
@@ -99,6 +137,12 @@ export interface AdminOverview {
   subtasks_overloaded_total: number
   subtasks_expired_total: number
   subtasks_completed_total: number
+}
+
+export interface AdminNATSConfigResponse {
+  operator_pub: string
+  account_pub: string
+  config: string
 }
 
 export interface PingParams {

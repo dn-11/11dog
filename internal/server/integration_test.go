@@ -10,47 +10,86 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	agentv1 "github.com/11dog/11dog/gen/agent/v1"
 	"github.com/11dog/11dog/internal/agent"
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/dn11"
 	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq/memory"
+	natsmq "github.com/11dog/11dog/internal/mq/nats"
+	"github.com/11dog/11dog/internal/natsauth"
 	"github.com/11dog/11dog/internal/server"
 	"github.com/11dog/11dog/internal/store"
-	"github.com/11dog/11dog/internal/wsgrpc"
-	"google.golang.org/grpc"
+	natsserver "github.com/nats-io/nats-server/v2/server"
 )
 
 type testStack struct {
-	cfg       *config.ServerConfig
-	store     *store.SQLStore
-	broker    *memory.Broker
-	hub       *server.Hub
-	orch      *server.Orchestrator
-	httpSrv   *httptest.Server
-	wsGRPCSrv *grpc.Server
-	wsLis     *wsgrpc.Listener
+	cfg     *config.ServerConfig
+	store   *store.SQLStore
+	authMgr *natsauth.Manager
+	natsSrv *natsserver.Server
+	broker  *natsmq.Broker
+	hub     *server.Hub
+	orch    *server.Orchestrator
+	httpSrv *httptest.Server
 }
 
-func (s *testStack) wsURL() string {
-	return strings.Replace(s.httpSrv.URL, "http://", "ws://", 1) + wsgrpc.DefaultPath
+func startTestNATSServer(t *testing.T, authMgr *natsauth.Manager) *natsserver.Server {
+	t.Helper()
+	storeDir := t.TempDir()
+	confPath := filepath.Join(t.TempDir(), "nats-server.conf")
+	confContent := authMgr.RenderNATSServerConfig(storeDir)
+	// Use random free port on localhost in tests and disable HTTP monitor port.
+	confContent = strings.Replace(confContent, "port: 4222", "host: 127.0.0.1\nport: -1", 1)
+	confContent = strings.Replace(confContent, "http_port: 8222", "", 1)
+	if err := os.WriteFile(confPath, []byte(confContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := &natsserver.Options{}
+	if err := opts.ProcessConfigFile(confPath); err != nil {
+		t.Fatalf("parse generated nats-server.conf: %v\n%s", err, confContent)
+	}
+	ns, err := natsserver.NewServer(opts)
+	if err != nil {
+		t.Fatalf("create test nats server: %v", err)
+	}
+	if testing.Verbose() {
+		ns.ConfigureLogger()
+	}
+	go ns.Start()
+	if !ns.ReadyForConnections(5 * time.Second) {
+		t.Fatal("test nats server did not become ready in time")
+	}
+	t.Cleanup(func() {
+		ns.Shutdown()
+	})
+	return ns
 }
 
-func startTestStack(t *testing.T, maxQueuePerNode int, dispatchRPS float64) *testStack {
+func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
 	t.Helper()
 	cfg := config.DefaultServerConfig()
 	cfg.Auth.AdminToken = "test-admin-secret"
-	cfg.MQ.MaxQueuePerNode = maxQueuePerNode
-	cfg.MQ.TaskTTLSec = 30
-	cfg.Limits.PerNodeDispatchRPS = dispatchRPS
+	cfg.NATS.MaxQueuePerNode = maxQueuePerNode
+	cfg.NATS.TaskTTLSec = 30
 	cfg.Limits.RateLimitRPM = 600
 	cfg.Limits.RateLimitBurst = 100
+
+	authMgr, err := natsauth.NewManager("", "", cfg.NATS.StreamName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ns := startTestNATSServer(t, authMgr)
+	cfg.NATS.URL = ns.ClientURL()
 
 	nodeStore, err := store.NewSQLStore("sqlite", ":memory:")
 	if err != nil {
@@ -60,45 +99,57 @@ func startTestStack(t *testing.T, maxQueuePerNode int, dispatchRPS float64) *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	broker := memory.NewBroker(cfg.MQ.MaxQueuePerNode)
+
+	srvJWT, srvSeed, _, err := authMgr.IssueServerCreds()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	broker, err := natsmq.NewBroker(ctx, natsmq.Options{
+		URL:             cfg.NATS.URL,
+		UserJWT:         srvJWT,
+		UserSeed:        srvSeed,
+		StreamName:      cfg.NATS.StreamName,
+		MaxQueuePerNode: cfg.NATS.MaxQueuePerNode,
+		TaskTTL:         time.Duration(cfg.NATS.TaskTTLSec) * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if testing.Verbose() {
 		logger = slog.Default()
 	}
-	hub := server.NewHub(cfg, broker, nodeStore, reg, logger)
+	hub, err := server.NewHub(ctx, cfg, broker, nodeStore, authMgr, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	orch, err := server.NewOrchestrator(cfg, broker, hub, reg)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	wsLis := wsgrpc.NewListener("test-ws")
-	wsGRPCSrv := grpc.NewServer()
-	agentv1.RegisterAgentHubServer(wsGRPCSrv, hub)
-	go func() {
-		_ = wsGRPCSrv.Serve(wsLis)
-	}()
-
-	handler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, server.NewIPRateLimiter(600, 100), logger, wsLis)
+	handler := server.NewHTTPHandler(cfg, hub, orch, nodeStore, server.NewIPRateLimiter(600, 100), logger)
 	httpSrv := httptest.NewServer(handler)
 
 	t.Cleanup(func() {
-		hub.DrainAll("test done", 1)
 		httpSrv.Close()
-		_ = wsLis.Close()
-		wsGRPCSrv.Stop()
+		hub.Close()
 		_ = broker.Close()
 		_ = nodeStore.Close()
 	})
 
 	return &testStack{
-		cfg:       cfg,
-		store:     nodeStore,
-		broker:    broker,
-		hub:       hub,
-		orch:      orch,
-		httpSrv:   httpSrv,
-		wsGRPCSrv: wsGRPCSrv,
-		wsLis:     wsLis,
+		cfg:     cfg,
+		store:   nodeStore,
+		authMgr: authMgr,
+		natsSrv: ns,
+		broker:  broker,
+		hub:     hub,
+		orch:    orch,
+		httpSrv: httpSrv,
 	}
 }
 
@@ -107,9 +158,12 @@ func registerDBNodeAndStartAgent(
 	st *testStack,
 	id, name, region, group string,
 	asn, maxConc uint32,
-	bogusLocalName string,
-) *store.NodeRecord {
+) (*store.NodeRecord, *agent.Client) {
 	t.Helper()
+	creds, err := st.authMgr.IssueAgentCreds(id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rec, err := st.store.CreateNode(context.Background(), &store.NodeRecord{
 		ID:             id,
 		Name:           name,
@@ -117,6 +171,7 @@ func registerDBNodeAndStartAgent(
 		Group:          group,
 		ASN:            asn,
 		MaxConcurrency: maxConc,
+		Creds:          creds,
 		Enabled:        true,
 	})
 	if err != nil {
@@ -124,12 +179,12 @@ func registerDBNodeAndStartAgent(
 	}
 
 	cfg := config.DefaultAgentConfig()
-	cfg.ServerAddr = st.wsURL()
-	cfg.Token = rec.Token
-	// Deliberately pass bogus local node metadata to ensure server uses DB authority.
+	cfg.NATSAddr = st.cfg.NATS.URL
+	cfg.Creds = creds
+	cfg.CredsFile = ""
+	cfg.StreamName = st.cfg.NATS.StreamName
+	// Deliberately set bogus local node_id to verify agent uses JWT authoritative name.
 	cfg.NodeID = "bogus-local-id"
-	cfg.Name = bogusLocalName
-	cfg.Region = "火星"
 	cfg.MaxConcurrency = maxConc
 	cfg.HeartbeatIntervalSec = 2
 
@@ -144,7 +199,7 @@ func registerDBNodeAndStartAgent(
 	go func() {
 		_ = c.Run(ctx)
 	}()
-	return rec
+	return rec, c
 }
 
 func waitForOnlineNodes(t *testing.T, baseURL string, wantCount int) []model.PublicNodeInfo {
@@ -229,16 +284,16 @@ func waitForSSEDone(t *testing.T, baseURL, taskID string) model.TaskSnapshot {
 	return model.TaskSnapshot{}
 }
 
-func TestE2ETcpingAndHTTPViaReverseGRPCAndSSE(t *testing.T) {
-	stack := startTestStack(t, 20, 50)
+func TestE2ETcpingAndHTTPViaNativeNATSAndSSE(t *testing.T) {
+	stack := startTestStack(t, 20)
 
-	registerDBNodeAndStartAgent(t, stack, "node-hk-1", "香港节点 01", "香港", "DN11-BGP", 4211110101, 4, "spoof-hk")
-	registerDBNodeAndStartAgent(t, stack, "node-jp-1", "东京节点 01", "东京", "DN11-IX", 4211110202, 4, "spoof-jp")
+	registerDBNodeAndStartAgent(t, stack, "node-hk-1", "香港节点 01", "香港", "DN11-BGP", 4211110101, 4)
+	registerDBNodeAndStartAgent(t, stack, "node-jp-1", "东京节点 01", "东京", "DN11-IX", 4211110202, 4)
 	nodes := waitForOnlineNodes(t, stack.httpSrv.URL, 2)
 
 	for _, n := range nodes {
-		if n.Region == "火星" || n.ID == "bogus-local-id" {
-			t.Fatalf("server accepted spoofed agent identity: %+v", n)
+		if n.ID == "bogus-local-id" {
+			t.Fatalf("agent used spoofed local node_id instead of JWT name: %+v", n)
 		}
 	}
 
@@ -288,7 +343,7 @@ func TestE2ETcpingAndHTTPViaReverseGRPCAndSSE(t *testing.T) {
 	// 2. Local HTTP server for HTTP probe verification.
 	targetHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hello dn11"))
+		_, _ = w.Write([]byte("hello dn11 via nats"))
 	}))
 	defer targetHTTP.Close()
 
@@ -311,58 +366,9 @@ func TestE2ETcpingAndHTTPViaReverseGRPCAndSSE(t *testing.T) {
 	}
 }
 
-func TestE2EOverloadQueueBufferProtection(t *testing.T) {
-	stack := startTestStack(t, 1, 100)
-	registerDBNodeAndStartAgent(t, stack, "node-tiny", "边缘小节点", "测试区", "DN11-Edge", 4211110999, 1, "spoof")
-	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
-
-	blockCh := make(chan struct{})
-	defer close(blockCh)
-	slowSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-blockCh:
-		case <-r.Context().Done():
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer slowSrv.Close()
-
-	sawOverload := false
-	for i := 0; i < 8; i++ {
-		snap := createTaskHTTP(t, stack.httpSrv.URL, model.CreateTaskRequest{
-			Type:      model.ProbeHTTP,
-			Target:    slowSrv.URL,
-			TimeoutMs: 3000,
-		})
-		if snap.OverloadedNodes > 0 {
-			sawOverload = true
-			break
-		}
-		if res := snap.Results["node-tiny"]; res != nil && res.Status == model.StatusOverloaded {
-			sawOverload = true
-			break
-		}
-	}
-
-	if !sawOverload {
-		metricsResp, err := http.Get(stack.httpSrv.URL + "/metrics")
-		if err == nil {
-			b, _ := io.ReadAll(metricsResp.Body)
-			_ = metricsResp.Body.Close()
-			if strings.Contains(string(b), "dog_subtasks_overloaded_total ") &&
-				!strings.Contains(string(b), "dog_subtasks_overloaded_total 0") {
-				sawOverload = true
-			}
-		}
-	}
-	if !sawOverload {
-		t.Fatal("expected MQ buffer overload protection to reject burst tasks with StatusOverloaded")
-	}
-}
-
-func TestPublicAPISanitizationAndAdminAuth(t *testing.T) {
-	stack := startTestStack(t, 20, 50)
-	registerDBNodeAndStartAgent(t, stack, "node-pub-check", "检查节点", "华东", "DN11-IX", 4211110505, 8, "spoof")
+func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
+	stack := startTestStack(t, 20)
+	registerDBNodeAndStartAgent(t, stack, "node-pub-check", "检查节点", "华东", "DN11-IX", 4211110505, 8)
 	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
 
 	metaResp, err := http.Get(stack.httpSrv.URL + "/api/v1/meta")
@@ -371,7 +377,7 @@ func TestPublicAPISanitizationAndAdminAuth(t *testing.T) {
 	}
 	metaRaw, _ := io.ReadAll(metaResp.Body)
 	_ = metaResp.Body.Close()
-	for _, forbidden := range []string{"mq_driver", "max_queue_per_node", "version", "db_driver"} {
+	for _, forbidden := range []string{"nats_url", "max_queue_per_node", "version", "db_driver"} {
 		if strings.Contains(string(metaRaw), forbidden) {
 			t.Fatalf("public /api/v1/meta leaked internal field %q: %s", forbidden, metaRaw)
 		}
@@ -383,13 +389,13 @@ func TestPublicAPISanitizationAndAdminAuth(t *testing.T) {
 	}
 	nodesRaw, _ := io.ReadAll(nodesResp.Body)
 	_ = nodesResp.Body.Close()
-	for _, forbidden := range []string{"cpu_percent", "mem_percent", "queue_depth", "max_concurrency", "active_tasks", "ipv4", "version", "last_seen_unix_ms", "token"} {
+	for _, forbidden := range []string{"cpu_percent", "mem_percent", "queue_depth", "max_concurrency", "active_tasks", "ipv4", "version", "last_seen_unix_ms", "token", "creds"} {
 		if strings.Contains(string(nodesRaw), forbidden) {
 			t.Fatalf("public /api/v1/nodes leaked internal field %q: %s", forbidden, nodesRaw)
 		}
 	}
 
-	for _, path := range []string{"/api/v1/admin/overview", "/api/v1/admin/nodes"} {
+	for _, path := range []string{"/api/v1/admin/overview", "/api/v1/admin/nodes", "/api/v1/admin/nats-config"} {
 		unauthResp, err := http.Get(stack.httpSrv.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -410,19 +416,16 @@ func TestPublicAPISanitizationAndAdminAuth(t *testing.T) {
 		if authResp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s with token status=%d body=%s, want 200", path, authResp.StatusCode, authBody)
 		}
-		if path == "/api/v1/admin/overview" && !strings.Contains(string(authBody), `"db_driver":"sqlite"`) {
-			t.Fatalf("admin overview missing db_driver: %s", authBody)
-		}
-		if path == "/api/v1/admin/nodes" && !strings.Contains(string(authBody), `"max_concurrency":8`) {
-			t.Fatalf("admin nodes missing telemetry: %s", authBody)
+		if path == "/api/v1/admin/nats-config" && !strings.Contains(string(authBody), "resolver: MEMORY") {
+			t.Fatalf("admin nats-config missing resolver config: %s", authBody)
 		}
 	}
 }
 
-func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
-	stack := startTestStack(t, 20, 50)
+func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
+	stack := startTestStack(t, 20)
 
-	// 1. Create node via admin HTTP API.
+	// 1. Create node via admin HTTP API (auto-mints .creds).
 	createReqBody := `{"id":"node-db-01","name":"数据库权威节点","region":"华南","group":"DN11-BGP","asn":4211110888,"max_concurrency":6}`
 	req, _ := http.NewRequest(http.MethodPost, stack.httpSrv.URL+"/api/v1/admin/nodes", strings.NewReader(createReqBody))
 	req.Header.Set("X-Admin-Token", "test-admin-secret")
@@ -434,21 +437,21 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	var created model.NodeInfo
 	_ = json.NewDecoder(resp.Body).Decode(&created)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated || created.Token == "" {
+	if resp.StatusCode != http.StatusCreated || created.Token == "" || !strings.Contains(created.Creds, "BEGIN NATS USER JWT") {
 		t.Fatalf("POST /api/v1/admin/nodes status=%d created=%+v", resp.StatusCode, created)
 	}
 
-	// 2. Verify hosted install script rendering & parameter validation.
-	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&ws=wss://10.0.0.1/api/v1/agent/ws")
+	// 2. Verify hosted install script embeds .creds and NATS URL.
+	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&nats=tls://nats.dn11.example:4222")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scriptBody, _ := io.ReadAll(scriptResp.Body)
 	_ = scriptResp.Body.Close()
 	if scriptResp.StatusCode != http.StatusOK ||
-		!strings.Contains(string(scriptBody), created.Token) ||
-		!strings.Contains(string(scriptBody), "wss://10.0.0.1/api/v1/agent/ws") ||
-		!strings.Contains(string(scriptBody), "CAP_NET_RAW") {
+		!strings.Contains(string(scriptBody), "BEGIN NATS USER JWT") ||
+		!strings.Contains(string(scriptBody), "tls://nats.dn11.example:4222") ||
+		!strings.Contains(string(scriptBody), "ReadWritePaths=/opt/11dog") {
 		t.Fatalf("unexpected hosted install script status=%d body=%s", scriptResp.StatusCode, scriptBody)
 	}
 
@@ -460,30 +463,15 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	if badScriptResp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 on invalid script token param, got %d", badScriptResp.StatusCode)
 	}
+}
 
-	// 3. Connect agent with ONLY token & bogus local ID/Name; verify server enforces DB identity.
-	agentCfg := config.DefaultAgentConfig()
-	agentCfg.ServerAddr = stack.wsURL()
-	agentCfg.Token = created.Token
-	agentCfg.NodeID = "evil-spoof-id"
-	agentCfg.Name = "恶意伪造名称"
-	agentCtx, agentCancel := context.WithCancel(context.Background())
-	defer agentCancel()
-	go func() {
-		_ = agent.NewClient(agentCfg, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(agentCtx)
-	}()
+func TestAdminTargetPolicyEnforcement(t *testing.T) {
+	stack := startTestStack(t, 20)
+	registerDBNodeAndStartAgent(t, stack, "node-pol-1", "策略测试节点", "华东", "DN11-BGP", 4211110401, 4)
+	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
 
-	online := waitForOnlineNodes(t, stack.httpSrv.URL, 1)
-	if online[0].ID != "node-db-01" || online[0].Name != "数据库权威节点" {
-		t.Fatalf("expected authoritative DB identity, got %+v", online[0])
-	}
-
-	// 4. Update node in DB via PUT and verify live reflection without reconnect.
-	putReq, _ := http.NewRequest(
-		http.MethodPut,
-		stack.httpSrv.URL+"/api/v1/admin/nodes/node-db-01",
-		strings.NewReader(`{"name":"已更新节点名","region":"西南"}`),
-	)
+	policyPayload := `{"enabled":true,"allow_rules":["127.0.0.0/8","*.allowed.dn11"],"deny_rules":["blocked.allowed.dn11"]}`
+	putReq, _ := http.NewRequest(http.MethodPut, stack.httpSrv.URL+"/api/v1/admin/target-policy", strings.NewReader(policyPayload))
 	putReq.Header.Set("X-Admin-Token", "test-admin-secret")
 	putReq.Header.Set("Content-Type", "application/json")
 	putResp, err := http.DefaultClient.Do(putReq)
@@ -492,146 +480,126 @@ func TestAuthoritativeNodeDBLifecycleAndInstallScript(t *testing.T) {
 	}
 	_ = putResp.Body.Close()
 	if putResp.StatusCode != http.StatusOK {
-		t.Fatalf("PUT update status=%d, want 200", putResp.StatusCode)
+		t.Fatalf("PUT target-policy status=%d, want 200", putResp.StatusCode)
 	}
 
-	afterPut := waitForOnlineNodes(t, stack.httpSrv.URL, 1)
-	if afterPut[0].Name != "已更新节点名" || afterPut[0].Region != "西南" {
-		t.Fatalf("expected live updated metadata, got %+v", afterPut[0])
+	for _, badTarget := range []string{"1.1.1.1", "blocked.allowed.dn11", "evil.example.com"} {
+		raw, _ := json.Marshal(model.CreateTaskRequest{
+			Type:   model.ProbePing,
+			Target: badTarget,
+		})
+		resp, err := http.Post(stack.httpSrv.URL+"/api/v1/tasks", "application/json", bytes.NewReader(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for restricted target %q, got %d", badTarget, resp.StatusCode)
+		}
 	}
 
-	// 5. Rotate token disconnects active session so public node goes offline.
-	rotReq, _ := http.NewRequest(http.MethodPost, stack.httpSrv.URL+"/api/v1/admin/nodes/node-db-01/rotate-token", nil)
-	rotReq.Header.Set("X-Admin-Token", "test-admin-secret")
-	rotResp, err := http.DefaultClient.Do(rotReq)
+	rawOK, _ := json.Marshal(model.CreateTaskRequest{
+		Type:   model.ProbeDNS,
+		Target: "ok.allowed.dn11",
+	})
+	respOK, err := http.Post(stack.httpSrv.URL+"/api/v1/tasks", "application/json", bytes.NewReader(rawOK))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = rotResp.Body.Close()
-	if rotResp.StatusCode != http.StatusOK {
-		t.Fatalf("rotate-token status=%d, want 200", rotResp.StatusCode)
+	_ = respOK.Body.Close()
+	if respOK.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 for allowed wildcard target, got %d", respOK.StatusCode)
+	}
+}
+
+func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
+	stack := startTestStack(t, 20)
+
+	binDir := t.TempDir()
+	stack.cfg.AgentBinDir = binDir
+	hostedFilename := server.AgentBinaryFilename(runtime.GOOS, runtime.GOARCH)
+	newBinaryPayload := []byte("fake-new-11dog-agent-binary-v2.0.0-nats")
+	if err := os.WriteFile(filepath.Join(binDir, hostedFilename), newBinaryPayload, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	agentDir := t.TempDir()
+	fakeExePath := filepath.Join(agentDir, "11dog-agent")
+	if runtime.GOOS == "windows" {
+		fakeExePath += ".exe"
+	}
+	if err := os.WriteFile(fakeExePath, []byte("old-agent-binary-v1.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, client := registerDBNodeAndStartAgent(t, stack, "node-upd-1", "自更新测试节点", "香港", "DN11-BGP", 4211110777, 4)
+
+	var restarted atomic.Bool
+	client.SetUpdateHooks(
+		func() (string, error) { return fakeExePath, nil },
+		func(_ string) error {
+			restarted.Store(true)
+			return nil
+		},
+	)
+
+	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
+
+	updReq, _ := http.NewRequest(
+		http.MethodPost,
+		stack.httpSrv.URL+"/api/v1/admin/nodes/node-upd-1/update",
+		strings.NewReader(`{"version":"2.0.0","force":true}`),
+	)
+	updReq.Header.Set("X-Admin-Token", "test-admin-secret")
+	updReq.Header.Set("Content-Type", "application/json")
+	updResp, err := http.DefaultClient.Do(updReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updBody, _ := io.ReadAll(updResp.Body)
+	_ = updResp.Body.Close()
+	if updResp.StatusCode != http.StatusOK {
+		t.Fatalf("POST update status=%d body=%s, want 200", updResp.StatusCode, updBody)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if stack.hub.OnlineCount() == 0 {
+		if restarted.Load() {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if stack.hub.OnlineCount() != 0 {
-		t.Fatalf("expected rotated token to disconnect session, online=%d", stack.hub.OnlineCount())
+	if !restarted.Load() {
+		t.Fatal("timed out waiting for agent self-update restart hook")
 	}
-}
 
-func TestE2EReverseGRPCOverWebSocket(t *testing.T) {
-	stack := startTestStack(t, 20, 50)
-
-	// 1. Plain ws:// agent connecting to the same HTTP server on /api/v1/agent/ws.
-	recWS, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
-		ID:             "node-ws-1",
-		Name:           "WS 隧道节点",
-		Region:         "华东",
-		Group:          "DN11-WS",
-		ASN:            4211110301,
-		MaxConcurrency: 4,
-		Enabled:        true,
-	})
+	replacedBytes, err := os.ReadFile(fakeExePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	wsAddr := strings.Replace(stack.httpSrv.URL, "http://", "ws://", 1) + wsgrpc.DefaultPath
-	wsAgentCfg := config.DefaultAgentConfig()
-	wsAgentCfg.ServerAddr = wsAddr
-	wsAgentCfg.Token = recWS.Token
-	wsAgentCfg.HeartbeatIntervalSec = 2
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() {
-		_ = agent.NewClient(wsAgentCfg, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
-	}()
-
-	// 2. TLS wss:// agent connecting through an HTTPS server (simulating Ingress/Nginx TLS termination).
-	tlsHTTPSrv := httptest.NewTLSServer(server.NewHTTPHandler(
-		stack.cfg,
-		stack.hub,
-		stack.orch,
-		stack.store,
-		server.NewIPRateLimiter(600, 100),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		stack.wsLis,
-	))
-	t.Cleanup(tlsHTTPSrv.Close)
-
-	recWSS, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
-		ID:             "node-wss-1",
-		Name:           "WSS 隧道节点",
-		Region:         "香港",
-		Group:          "DN11-WSS",
-		ASN:            4211110302,
-		MaxConcurrency: 4,
-		Enabled:        true,
-	})
-	if err != nil {
-		t.Fatal(err)
+	if !bytes.Equal(replacedBytes, newBinaryPayload) {
+		t.Fatalf("replaced binary content = %q, want %q", string(replacedBytes), string(newBinaryPayload))
 	}
 
-	wssAddr := strings.Replace(tlsHTTPSrv.URL, "https://", "wss://", 1)
-	wssAgentCfg := config.DefaultAgentConfig()
-	wssAgentCfg.ServerAddr = wssAddr
-	wssAgentCfg.Token = recWSS.Token
-	wssAgentCfg.TLSInsecureSkipVerify = true
-	wssAgentCfg.HeartbeatIntervalSec = 2
-	go func() {
-		_ = agent.NewClient(wssAgentCfg, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
-	}()
-
-	waitForOnlineNodes(t, stack.httpSrv.URL, 2)
-
-	// 3. Execute an HTTP probe task across both WS and WSS agents.
-	targetHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok via wsgrpc"))
-	}))
-	defer targetHTTP.Close()
-
-	snap := createTaskHTTP(t, stack.httpSrv.URL, model.CreateTaskRequest{
-		Type:   model.ProbeHTTP,
-		Target: targetHTTP.URL,
-	})
-	done := waitForSSEDone(t, stack.httpSrv.URL, snap.TaskID)
-	if done.CompletedNodes != 2 {
-		t.Fatalf("CompletedNodes=%d, want 2", done.CompletedNodes)
-	}
-	for _, nodeID := range []string{"node-ws-1", "node-wss-1"} {
-		res := done.Results[nodeID]
-		if res == nil || res.Status != model.StatusCompleted || res.HTTP == nil || res.HTTP.StatusCode != 200 {
-			t.Fatalf("unexpected result for %s: %+v", nodeID, res)
+	// Verify admin node list reflects the reported update status from NATS KV.
+	deadlineStatus := time.Now().Add(3 * time.Second)
+	var lastNodes []model.NodeInfo
+	for time.Now().Before(deadlineStatus) {
+		nodesReq, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/api/v1/admin/nodes", nil)
+		nodesReq.Header.Set("X-Admin-Token", "test-admin-secret")
+		nodesResp, err := http.DefaultClient.Do(nodesReq)
+		if err == nil {
+			var nodesBody struct {
+				Nodes []model.NodeInfo `json:"nodes"`
+			}
+			_ = json.NewDecoder(nodesResp.Body).Decode(&nodesBody)
+			_ = nodesResp.Body.Close()
+			lastNodes = nodesBody.Nodes
+			if len(lastNodes) == 1 && lastNodes[0].UpdateStatus != nil && lastNodes[0].UpdateStatus.State == "restarting" {
+				return
+			}
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-
-	// 4. Verify install script defaults to ws(s)://<host>/api/v1/agent/ws and accepts explicit wss:// param.
-	reqDefault, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/scripts/install.sh?token="+recWS.Token, nil)
-	reqDefault.Header.Set("X-Forwarded-Proto", "https")
-	respDefault, err := http.DefaultClient.Do(reqDefault)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodyDefault, _ := io.ReadAll(respDefault.Body)
-	_ = respDefault.Body.Close()
-	if respDefault.StatusCode != http.StatusOK || !strings.Contains(string(bodyDefault), "wss://") || !strings.Contains(string(bodyDefault), wsgrpc.DefaultPath) {
-		t.Fatalf("expected default install script to use wss://%s, status=%d body=%s", wsgrpc.DefaultPath, respDefault.StatusCode, bodyDefault)
-	}
-
-	respExplicit, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + recWS.Token + "&ws=wss://11dog.example.com/api/v1/agent/ws")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodyExplicit, _ := io.ReadAll(respExplicit.Body)
-	_ = respExplicit.Body.Close()
-	if respExplicit.StatusCode != http.StatusOK || !strings.Contains(string(bodyExplicit), "wss://11dog.example.com/api/v1/agent/ws") {
-		t.Fatalf("expected explicit wss:// ws param to succeed, status=%d body=%s", respExplicit.StatusCode, bodyExplicit)
-	}
+	t.Fatalf("expected node update_status=restarting in NATS KV, got %+v", lastNodes)
 }

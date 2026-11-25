@@ -2,709 +2,339 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	agentv1 "github.com/11dog/11dog/gen/agent/v1"
 	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/dn11"
 	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq"
+	"github.com/11dog/11dog/internal/mq/nats"
+	"github.com/11dog/11dog/internal/natsauth"
 	"github.com/11dog/11dog/internal/store"
-	"golang.org/x/time/rate"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
-type inFlightSubtask struct {
-	taskID string
-	nodeID string
-	timer  *time.Timer
-}
+const (
+	kvNodesBucket   = "DOG_NODES"
+	kvUpdatesBucket = "DOG_UPDATES"
+	nodeOnlineTTL   = 35 * time.Second
+)
 
-type agentSession struct {
-	infoMu      sync.RWMutex
-	info        model.NodeInfo
-	stream      agentv1.AgentHub_ConnectServer
-	sendMu      sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	sem         chan struct{}
-	dispatchLim *rate.Limiter
-
-	inflightMu sync.Mutex
-	inflight   map[string]*inFlightSubtask
-}
-
-func (s *agentSession) getInfo() model.NodeInfo {
-	s.infoMu.RLock()
-	defer s.infoMu.RUnlock()
-	cp := s.info
-	cp.Capabilities = append([]model.ProbeType(nil), s.info.Capabilities...)
-	return cp
-}
-
-func (s *agentSession) updateTelemetry(activeTasks uint32, cpu, mem float64, nowMs int64) {
-	s.infoMu.Lock()
-	s.info.ActiveTasks = activeTasks
-	s.info.CPUPercent = cpu
-	s.info.MemPercent = mem
-	s.info.LastSeenUnixMs = nowMs
-	s.infoMu.Unlock()
-}
-
-func (s *agentSession) applyRecord(rec *store.NodeRecord) {
-	s.infoMu.Lock()
-	s.info.Name = rec.Name
-	s.info.Region = rec.Region
-	s.info.Group = rec.Group
-	s.info.ASN = rec.ASN
-	s.info.MaxConcurrency = rec.MaxConcurrency
-	s.info.Enabled = rec.Enabled
-	s.info.Notes = rec.Notes
-	s.info.Token = rec.Token
-	s.info.CreatedAtMs = rec.CreatedAtMs
-	s.info.UpdatedAtMs = rec.UpdatedAtMs
-	s.infoMu.Unlock()
-}
-
-func (s *agentSession) send(msg *agentv1.ServerMessage) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	return s.stream.Send(msg)
-}
-
-func (s *agentSession) releaseInflight(subtaskID string) bool {
-	s.inflightMu.Lock()
-	entry, ok := s.inflight[subtaskID]
-	if ok {
-		delete(s.inflight, subtaskID)
-	}
-	s.inflightMu.Unlock()
-	if !ok {
-		return false
-	}
-	if entry.timer != nil {
-		entry.timer.Stop()
-	}
-	select {
-	case <-s.sem:
-	default:
-	}
-	return true
-}
-
-func (s *agentSession) releaseAllInflight() {
-	s.inflightMu.Lock()
-	entries := make([]*inFlightSubtask, 0, len(s.inflight))
-	for k, v := range s.inflight {
-		entries = append(entries, v)
-		delete(s.inflight, k)
-	}
-	s.inflightMu.Unlock()
-	for _, entry := range entries {
-		if entry.timer != nil {
-			entry.timer.Stop()
-		}
-		select {
-		case <-s.sem:
-		default:
-		}
-	}
-}
-
-// HubMetricsCallbacks lets the orchestrator observe hub task lifecycle counts.
-type HubMetricsCallbacks struct {
-	OnExpired   func()
-	OnCompleted func()
-}
-
-// Hub implements agentv1.AgentHubServer for reverse-gRPC edge node sessions.
-// Authoritative node identities & tokens live in NodeStore.
+// Hub manages stateless edge node telemetry (via NATS KV) and control commands (via Core NATS).
+// Authoritative node identities & .creds live in NodeStore; any server replica shares the same live view.
 type Hub struct {
-	agentv1.UnimplementedAgentHubServer
-
 	cfg     *config.ServerConfig
-	broker  mq.Broker
+	broker  *nats.Broker
 	store   store.NodeStore
-	dn11Reg *dn11.Registry
+	authMgr *natsauth.Manager
 	logger  *slog.Logger
-	metrics HubMetricsCallbacks
 
-	mu       sync.RWMutex
-	sessions map[string]*agentSession
-	// lastSeen tracks runtime host metadata (IPs, version, capabilities) between reconnects.
-	lastRuntime map[string]model.NodeInfo
+	nodesKV   jetstream.KeyValue
+	updatesKV jetstream.KeyValue
+
+	mu   sync.Mutex
+	subs []*natsgo.Subscription
 }
 
-// NewHub creates a reverse-gRPC Hub backed by authoritative NodeStore.
-func NewHub(cfg *config.ServerConfig, broker mq.Broker, nodeStore store.NodeStore, dn11Reg *dn11.Registry, logger *slog.Logger) *Hub {
+// NewHub initializes NATS KV buckets for runtime node telemetry and subscribes to agent heartbeat/update subjects.
+func NewHub(ctx context.Context, cfg *config.ServerConfig, broker *nats.Broker, nodeStore store.NodeStore, authMgr *natsauth.Manager, logger *slog.Logger) (*Hub, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Hub{
-		cfg:         cfg,
-		broker:      broker,
-		store:       nodeStore,
-		dn11Reg:     dn11Reg,
-		logger:      logger,
-		sessions:    make(map[string]*agentSession),
-		lastRuntime: make(map[string]model.NodeInfo),
-	}
-}
+	js := broker.JetStream()
 
-// SetMetricsCallbacks registers optional lifecycle counter callbacks.
-func (h *Hub) SetMetricsCallbacks(cb HubMetricsCallbacks) {
-	h.metrics = cb
-}
-
-func extractAgentToken(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if !ok {
-		return ""
-	}
-	if vals := md.Get("x-agent-token"); len(vals) > 0 {
-		return strings.TrimSpace(vals[0])
-	}
-	if vals := md.Get("authorization"); len(vals) > 0 {
-		raw := strings.TrimSpace(vals[0])
-		if strings.HasPrefix(strings.ToLower(raw), "bearer ") {
-			return strings.TrimSpace(raw[7:])
-		}
-		return raw
-	}
-	return ""
-}
-
-func (h *Hub) authenticateNode(ctx context.Context) (*store.NodeRecord, error) {
-	token := extractAgentToken(ctx)
-	if token == "" {
-		return nil, status.Error(codes.Unauthenticated, "missing agent communication token")
-	}
-	rec, err := h.store.GetNodeByToken(ctx, token)
+	nodesKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:  kvNodesBucket,
+		TTL:     nodeOnlineTTL,
+		Storage: jetstream.MemoryStorage,
+	})
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, status.Error(codes.Unauthenticated, "invalid agent communication token")
-		}
-		return nil, status.Errorf(codes.Internal, "lookup agent token: %v", err)
+		return nil, fmt.Errorf("init %s kv bucket: %w", kvNodesBucket, err)
 	}
-	if !rec.Enabled {
-		return nil, status.Error(codes.PermissionDenied, "node is disabled by administrator")
+
+	updatesKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:  kvUpdatesBucket,
+		TTL:     24 * time.Hour,
+		Storage: jetstream.MemoryStorage,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init %s kv bucket: %w", kvUpdatesBucket, err)
 	}
-	return rec, nil
+
+	h := &Hub{
+		cfg:       cfg,
+		broker:    broker,
+		store:     nodeStore,
+		authMgr:   authMgr,
+		logger:    logger,
+		nodesKV:   nodesKV,
+		updatesKV: updatesKV,
+	}
+
+	nc := broker.Conn()
+	hbSub, err := nc.QueueSubscribe("agent.hb.*", "11dog-servers", h.handleHeartbeatMsg)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe agent.hb.*: %w", err)
+	}
+	updSub, err := nc.QueueSubscribe("agent.update.*", "11dog-servers", h.handleUpdateStatusMsg)
+	if err != nil {
+		_ = hbSub.Unsubscribe()
+		return nil, fmt.Errorf("subscribe agent.update.*: %w", err)
+	}
+	h.subs = []*natsgo.Subscription{hbSub, updSub}
+
+	return h, nil
 }
 
-// Connect handles an incoming reverse gRPC bi-directional stream from an edge agent.
-func (h *Hub) Connect(stream agentv1.AgentHub_ConnectServer) error {
-	ctx := stream.Context()
-	rec, err := h.authenticateNode(ctx)
+// Close unsubscribes NATS listeners held by Hub.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, sub := range h.subs {
+		_ = sub.Unsubscribe()
+	}
+	h.subs = nil
+}
+
+// AuthManager returns the NATS JWT/NKey manager used by this Hub.
+func (h *Hub) AuthManager() *natsauth.Manager {
+	return h.authMgr
+}
+
+func (h *Hub) handleHeartbeatMsg(msg *natsgo.Msg) {
+	var hb model.AgentHeartbeat
+	if err := json.Unmarshal(msg.Data, &hb); err != nil {
+		return
+	}
+	if hb.TimestampUnixMs == 0 {
+		hb.TimestampUnixMs = time.Now().UnixMilli()
+	}
+	safeID := strings.TrimPrefix(msg.Subject, "agent.hb.")
+	if safeID == "" {
+		safeID = natsauth.SanitizeSubjectToken(hb.NodeID)
+	}
+	data, err := json.Marshal(hb)
 	if err != nil {
-		return err
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := h.nodesKV.Put(ctx, safeID, data); err != nil {
+		h.logger.Warn("failed to store agent heartbeat in NATS KV", "node_id", safeID, "error", err)
+	}
+}
 
-	firstMsg, err := stream.Recv()
+func (h *Hub) handleUpdateStatusMsg(msg *natsgo.Msg) {
+	var st model.AgentUpdateState
+	if err := json.Unmarshal(msg.Data, &st); err != nil {
+		return
+	}
+	if st.UpdatedAtMs == 0 {
+		st.UpdatedAtMs = time.Now().UnixMilli()
+	}
+	safeID := strings.TrimPrefix(msg.Subject, "agent.update.")
+	if safeID == "" {
+		return
+	}
+	data, err := json.Marshal(st)
 	if err != nil {
-		return err
+		return
 	}
-	reg := firstMsg.GetRegister()
-	if reg == nil {
-		return status.Error(codes.InvalidArgument, "first message must be RegisterRequest")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := h.updatesKV.Put(ctx, safeID, data); err != nil {
+		h.logger.Warn("failed to store agent update status in NATS KV", "node_id", safeID, "error", err)
+		return
 	}
-
-	maxConc := rec.MaxConcurrency
-	if maxConc == 0 {
-		maxConc = 8
-	}
-	if reg.MaxConcurrency > 0 && reg.MaxConcurrency < maxConc {
-		maxConc = reg.MaxConcurrency
-	}
-	if maxConc > 128 {
-		maxConc = 128
-	}
-
-	caps := make([]model.ProbeType, 0, len(reg.Capabilities))
-	for _, c := range reg.Capabilities {
-		if pt := model.ProbeTypeFromProto(c); pt.IsValid() {
-			caps = append(caps, pt)
-		}
-	}
-	if len(caps) == 0 {
-		caps = []model.ProbeType{model.ProbePing, model.ProbeTcping, model.ProbeHTTP, model.ProbeTraceroute, model.ProbeDNS}
-	}
-
-	ipv4 := reg.Ipv4
-	if ipv4 == "" {
-		if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
-			host := p.Addr.String()
-			if idx := strings.LastIndex(host, ":"); idx > 0 {
-				host = host[:idx]
-			}
-			host = strings.Trim(host, "[]")
-			if strings.Contains(host, ".") {
-				ipv4 = host
-			}
-		}
-	}
-
-	nowMs := time.Now().UnixMilli()
-	rps := h.cfg.Limits.PerNodeDispatchRPS
-	if rps <= 0 {
-		rps = 10
-	}
-	burst := int(maxConc)
-	if burst < 2 {
-		burst = 2
-	}
-
-	sessCtx, sessCancel := context.WithCancel(ctx)
-	session := &agentSession{
-		info: model.NodeInfo{
-			ID:             rec.ID,
-			Name:           rec.Name,
-			Region:         rec.Region,
-			Group:          rec.Group,
-			ASN:            rec.ASN,
-			IPv4:           ipv4,
-			IPv6:           reg.Ipv6,
-			Capabilities:   caps,
-			MaxConcurrency: maxConc,
-			Version:        reg.Version,
-			Status:         "online",
-			Enabled:        rec.Enabled,
-			Notes:          rec.Notes,
-			Token:          rec.Token,
-			CreatedAtMs:    rec.CreatedAtMs,
-			UpdatedAtMs:    rec.UpdatedAtMs,
-			LastSeenUnixMs: nowMs,
-			ConnectedAtMs:  nowMs,
-			Labels:         reg.Labels,
-		},
-		stream:      stream,
-		ctx:         sessCtx,
-		cancel:      sessCancel,
-		sem:         make(chan struct{}, maxConc),
-		dispatchLim: rate.NewLimiter(rate.Limit(rps), burst),
-		inflight:    make(map[string]*inFlightSubtask),
-	}
-
-	h.registerSession(session)
-	defer h.unregisterSession(session)
-
-	if err := session.send(&agentv1.ServerMessage{
-		Payload: &agentv1.ServerMessage_RegisterResp{
-			RegisterResp: &agentv1.RegisterResponse{
-				Accepted:               true,
-				Message:                "registered",
-				HeartbeatIntervalSec:   10,
-				AssignedMaxConcurrency: maxConc,
-				AssignedNodeId:         rec.ID,
-				AssignedName:           rec.Name,
-			},
-		},
-	}); err != nil {
-		return err
-	}
-
-	h.logger.Info("agent authenticated and connected",
-		"node_id", rec.ID,
-		"name", rec.Name,
-		"region", rec.Region,
-		"group", rec.Group,
-		"asn", rec.ASN,
-		"max_concurrency", maxConc,
+	h.logger.Info("agent update status reported",
+		"node_id", safeID,
+		"target_version", st.TargetVersion,
+		"state", st.State,
+		"message", st.Message,
 	)
-
-	go h.runDispatcher(session)
-
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			if errors.Is(err, io.EOF) || sessCtx.Err() != nil {
-				return nil
-			}
-			return err
-		}
-		h.handleAgentMessage(session, msg)
-	}
 }
 
-func (h *Hub) registerSession(session *agentSession) {
-	info := session.getInfo()
-	h.mu.Lock()
-	old := h.sessions[info.ID]
-	h.sessions[info.ID] = session
-	h.lastRuntime[info.ID] = info
-	h.mu.Unlock()
-
-	if old != nil {
-		old.cancel()
+func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID string) (*model.AgentHeartbeat, bool) {
+	entry, err := h.nodesKV.Get(ctx, natsauth.SanitizeSubjectToken(nodeID))
+	if err != nil {
+		return nil, false
 	}
+	var hb model.AgentHeartbeat
+	if err := json.Unmarshal(entry.Value(), &hb); err != nil {
+		return nil, false
+	}
+	return &hb, true
 }
 
-func (h *Hub) unregisterSession(session *agentSession) {
-	session.cancel()
-	session.releaseAllInflight()
-
-	info := session.getInfo()
-	h.mu.Lock()
-	if cur, ok := h.sessions[info.ID]; ok && cur == session {
-		delete(h.sessions, info.ID)
-		info.Status = "offline"
-		info.ActiveTasks = 0
-		info.LastSeenUnixMs = time.Now().UnixMilli()
-		h.lastRuntime[info.ID] = info
-	}
-	h.mu.Unlock()
-
-	h.logger.Info("agent disconnected", "node_id", info.ID)
-}
-
-func (h *Hub) runDispatcher(session *agentSession) {
-	nodeID := session.getInfo().ID
-	err := h.broker.ConsumeNodeQueue(session.ctx, nodeID, int(session.getInfo().MaxConcurrency), func(ctx context.Context, subtask *mq.QueuedSubtask) error {
-		if !subtask.Deadline.IsZero() && time.Now().After(subtask.Deadline) {
-			h.publishSyntheticResult(session, subtask, model.StatusExpired, "节点等待超时")
-			if h.metrics.OnExpired != nil {
-				h.metrics.OnExpired()
-			}
-			return nil
-		}
-
-		if err := session.dispatchLim.Wait(ctx); err != nil {
-			return err
-		}
-
-		select {
-		case session.sem <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		if !subtask.Deadline.IsZero() && time.Now().After(subtask.Deadline) {
-			select {
-			case <-session.sem:
-			default:
-			}
-			h.publishSyntheticResult(session, subtask, model.StatusExpired, "节点等待超时")
-			if h.metrics.OnExpired != nil {
-				h.metrics.OnExpired()
-			}
-			return nil
-		}
-
-		waitDur := time.Until(subtask.Deadline) + 5*time.Second
-		if waitDur < 10*time.Second {
-			waitDur = 10 * time.Second
-		}
-		timer := time.AfterFunc(waitDur, func() {
-			if session.releaseInflight(subtask.SubtaskID) {
-				h.publishSyntheticResult(session, subtask, model.StatusTimeout, "节点探测执行超时未回传结果")
-			}
-		})
-
-		session.inflightMu.Lock()
-		session.inflight[subtask.SubtaskID] = &inFlightSubtask{
-			taskID: subtask.TaskID,
-			nodeID: nodeID,
-			timer:  timer,
-		}
-		session.inflightMu.Unlock()
-
-		dispatchMsg := &agentv1.ServerMessage{
-			Payload: &agentv1.ServerMessage_DispatchTask{
-				DispatchTask: &agentv1.DispatchTask{
-					TaskId:         subtask.TaskID,
-					SubtaskId:      subtask.SubtaskID,
-					Type:           model.ProbeTypeToProto(subtask.Type),
-					Target:         subtask.Target,
-					DeadlineUnixMs: subtask.Deadline.UnixMilli(),
-					TimeoutMs:      subtask.TimeoutMs,
-					Params:         model.ProbeParamsToProto(subtask.Type, subtask.Params),
-				},
-			},
-		}
-
-		if err := session.send(dispatchMsg); err != nil {
-			session.releaseInflight(subtask.SubtaskID)
-			return err
-		}
-
-		_ = h.broker.PublishResult(context.Background(), &model.TaskEvent{
-			EventType: "progress",
-			TaskID:    subtask.TaskID,
-			SubtaskID: subtask.SubtaskID,
-			NodeID:    nodeID,
-			Type:      subtask.Type,
-			Status:    model.StatusRunning,
-		})
+func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID string) *model.AgentUpdateState {
+	entry, err := h.updatesKV.Get(ctx, natsauth.SanitizeSubjectToken(nodeID))
+	if err != nil {
 		return nil
-	})
-	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, mq.ErrClosed) {
-		h.logger.Warn("dispatcher stopped", "node_id", nodeID, "error", err)
 	}
+	var st model.AgentUpdateState
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		return nil
+	}
+	return &st
 }
 
-func (h *Hub) publishSyntheticResult(session *agentSession, subtask *mq.QueuedSubtask, st model.TaskStatus, errMsg string) {
-	info := session.getInfo()
-	res := &model.NodeTaskResult{
-		TaskID:         subtask.TaskID,
-		SubtaskID:      subtask.SubtaskID,
-		NodeID:         info.ID,
-		NodeName:       info.Name,
-		Region:         info.Region,
-		Group:          info.Group,
-		NodeASN:        info.ASN,
-		Type:           subtask.Type,
-		Status:         st,
-		ErrorMessage:   errMsg,
-		FinishedUnixMs: time.Now().UnixMilli(),
-	}
-	_ = h.broker.PublishResult(context.Background(), &model.TaskEvent{
-		EventType: "result",
-		TaskID:    subtask.TaskID,
-		SubtaskID: subtask.SubtaskID,
-		NodeID:    info.ID,
-		Type:      subtask.Type,
-		Status:    st,
-		Result:    res,
-	})
-}
-
-func (h *Hub) handleAgentMessage(session *agentSession, msg *agentv1.AgentMessage) {
-	info := session.getInfo()
-
-	switch payload := msg.Payload.(type) {
-	case *agentv1.AgentMessage_Heartbeat:
-		hb := payload.Heartbeat
-		if hb == nil {
-			return
-		}
-		nowMs := time.Now().UnixMilli()
-		session.updateTelemetry(hb.ActiveTasks, hb.CpuPercent, hb.MemPercent, nowMs)
-
-		h.mu.Lock()
-		h.lastRuntime[info.ID] = session.getInfo()
-		h.mu.Unlock()
-
-		_ = session.send(&agentv1.ServerMessage{
-			Payload: &agentv1.ServerMessage_HeartbeatAck{
-				HeartbeatAck: &agentv1.HeartbeatAck{
-					ServerUnixMs: nowMs,
-				},
-			},
-		})
-
-	case *agentv1.AgentMessage_TaskAck:
-		ack := payload.TaskAck
-		if ack == nil {
-			return
-		}
-		if !ack.Accepted {
-			session.releaseInflight(ack.SubtaskId)
-			reason := ack.RejectReason
-			if reason == "" {
-				reason = "节点繁忙，请稍后再试"
-			}
-			res := &model.NodeTaskResult{
-				TaskID:         ack.TaskId,
-				SubtaskID:      ack.SubtaskId,
-				NodeID:         info.ID,
-				NodeName:       info.Name,
-				Region:         info.Region,
-				Group:          info.Group,
-				NodeASN:        info.ASN,
-				Status:         model.StatusOverloaded,
-				ErrorMessage:   reason,
-				FinishedUnixMs: time.Now().UnixMilli(),
-			}
-			_ = h.broker.PublishResult(context.Background(), &model.TaskEvent{
-				EventType: "result",
-				TaskID:    ack.TaskId,
-				SubtaskID: ack.SubtaskId,
-				NodeID:    info.ID,
-				Status:    model.StatusOverloaded,
-				Result:    res,
-			})
-		}
-
-	case *agentv1.AgentMessage_TaskProgress:
-		prog := payload.TaskProgress
-		if prog == nil {
-			return
-		}
-		p := model.ProgressFromProto(prog)
-		if p != nil && p.TracerouteHop != nil && p.TracerouteHop.IP != "" && h.dn11Reg != nil {
-			p.TracerouteHop.DN11 = h.dn11Reg.Lookup(p.TracerouteHop.IP)
-		}
-		_ = h.broker.PublishResult(context.Background(), &model.TaskEvent{
-			EventType: "progress",
-			TaskID:    prog.TaskId,
-			SubtaskID: prog.SubtaskId,
-			NodeID:    info.ID,
-			Type:      model.ProbeTypeFromProto(prog.Type),
-			Status:    model.StatusRunning,
-			Progress:  p,
-		})
-
-	case *agentv1.AgentMessage_TaskResult:
-		tr := payload.TaskResult
-		if tr == nil {
-			return
-		}
-		session.releaseInflight(tr.SubtaskId)
-
-		res := model.TaskResultFromProto(tr)
-		res.NodeID = info.ID
-		res.NodeName = info.Name
-		res.Region = info.Region
-		res.Group = info.Group
-		res.NodeASN = info.ASN
-
-		if h.dn11Reg != nil {
-			if res.ResolvedIP != "" {
-				res.ResolvedDN11 = h.dn11Reg.Lookup(res.ResolvedIP)
-			}
-			if res.Traceroute != nil {
-				for i := range res.Traceroute.Hops {
-					if res.Traceroute.Hops[i].IP != "" {
-						res.Traceroute.Hops[i].DN11 = h.dn11Reg.Lookup(res.Traceroute.Hops[i].IP)
-					}
-				}
-			}
-		}
-
-		if h.metrics.OnCompleted != nil {
-			h.metrics.OnCompleted()
-		}
-
-		_ = h.broker.PublishResult(context.Background(), &model.TaskEvent{
-			EventType: "result",
-			TaskID:    res.TaskID,
-			SubtaskID: res.SubtaskID,
-			NodeID:    res.NodeID,
-			Type:      res.Type,
-			Status:    res.Status,
-			Result:    res,
-		})
-	}
-}
-
-// CancelTask sends a cancellation signal to a specific online node.
+// CancelTask publishes a cancellation command to a specific node over Core NATS.
 func (h *Hub) CancelTask(nodeID, taskID, subtaskID, reason string) error {
-	h.mu.RLock()
-	session := h.sessions[nodeID]
-	h.mu.RUnlock()
-	if session == nil {
-		return fmt.Errorf("node %q is offline", nodeID)
-	}
-	return session.send(&agentv1.ServerMessage{
-		Payload: &agentv1.ServerMessage_CancelTask{
-			CancelTask: &agentv1.CancelTask{
-				TaskId:    taskID,
-				SubtaskId: subtaskID,
-				Reason:    reason,
-			},
-		},
+	payload, err := json.Marshal(model.CancelTaskCommand{
+		TaskID:    taskID,
+		SubtaskID: subtaskID,
+		Reason:    reason,
 	})
+	if err != nil {
+		return err
+	}
+	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".cancel"
+	return h.broker.Conn().Publish(subj, payload)
 }
 
-// SyncNode updates an active session's metadata from DB; disconnects it if disabled.
-func (h *Hub) SyncNode(rec *store.NodeRecord) {
-	if rec == nil {
-		return
-	}
-	h.mu.RLock()
-	session := h.sessions[rec.ID]
-	h.mu.RUnlock()
-	if session == nil {
-		return
-	}
-	session.applyRecord(rec)
-	if !rec.Enabled {
-		_ = session.send(&agentv1.ServerMessage{
-			Payload: &agentv1.ServerMessage_ServerDrain{
-				ServerDrain: &agentv1.ServerDrain{
-					Reason:            "node disabled by administrator",
-					ReconnectAfterSec: 15,
-				},
-			},
-		})
-		session.cancel()
-	}
-}
-
-// RevokeNodeSession disconnects an active session when its token is rotated or node is deleted.
-func (h *Hub) RevokeNodeSession(nodeID string) {
-	h.mu.RLock()
-	session := h.sessions[nodeID]
-	h.mu.RUnlock()
-	if session != nil {
-		_ = session.send(&agentv1.ServerMessage{
-			Payload: &agentv1.ServerMessage_ServerDrain{
-				ServerDrain: &agentv1.ServerDrain{
-					Reason:            "credentials revoked by administrator",
-					ReconnectAfterSec: 15,
-				},
-			},
-		})
-		session.cancel()
-	}
-	h.mu.Lock()
-	delete(h.lastRuntime, nodeID)
-	h.mu.Unlock()
-}
-
-// DisconnectNode gracefully drains and disconnects an active node session so it reconnects.
+// DisconnectNode sends a reconnect command to an online node over Core NATS.
 func (h *Hub) DisconnectNode(nodeID string) bool {
-	h.mu.RLock()
-	session := h.sessions[nodeID]
-	h.mu.RUnlock()
-	if session == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, ok := h.getNodeHeartbeat(ctx, nodeID); !ok {
 		return false
 	}
-	_ = session.send(&agentv1.ServerMessage{
-		Payload: &agentv1.ServerMessage_ServerDrain{
-			ServerDrain: &agentv1.ServerDrain{
-				Reason:            "disconnected by admin",
-				ReconnectAfterSec: 3,
-			},
-		},
+	payload, _ := json.Marshal(model.ReconnectCommand{
+		Reason:            "reconnect requested by admin",
+		ReconnectAfterSec: 2,
 	})
-	session.cancel()
-	return true
+	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".reconnect"
+	return h.broker.Conn().Publish(subj, payload) == nil
 }
 
-// DrainAll notifies all connected agents to gracefully reconnect before server shutdown.
-func (h *Hub) DrainAll(reason string, reconnectAfterSec uint32) {
-	h.mu.RLock()
-	sessions := make([]*agentSession, 0, len(h.sessions))
-	for _, s := range h.sessions {
-		sessions = append(sessions, s)
-	}
-	h.mu.RUnlock()
+// TriggerAgentUpdate pushes a self-update command to a single online node over Core NATS.
+func (h *Hub) TriggerAgentUpdate(nodeID string, req model.AdminTriggerUpdateRequest, fallbackDownloadBase string) model.AdminUpdateNodeResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
-	for _, s := range sessions {
-		_ = s.send(&agentv1.ServerMessage{
-			Payload: &agentv1.ServerMessage_ServerDrain{
-				ServerDrain: &agentv1.ServerDrain{
-					Reason:            reason,
-					ReconnectAfterSec: reconnectAfterSec,
-				},
-			},
-		})
-		s.cancel()
+	hb, online := h.getNodeHeartbeat(ctx, nodeID)
+	if !online {
+		return model.AdminUpdateNodeResult{
+			NodeID:  nodeID,
+			Sent:    false,
+			Message: "节点不在线",
+		}
+	}
+
+	targetVersion := strings.TrimSpace(req.Version)
+	if targetVersion == "" {
+		targetVersion = Version
+	}
+
+	downloadURL := strings.TrimSpace(req.DownloadURL)
+	shaHex := strings.TrimSpace(req.SHA256)
+
+	if downloadURL == "" {
+		filename := AgentBinaryFilename(hb.OS, hb.Arch)
+		base := strings.TrimRight(strings.TrimSpace(h.cfg.AgentDownloadBaseURL), "/")
+		if base == "" {
+			base = strings.TrimRight(strings.TrimSpace(fallbackDownloadBase), "/")
+		}
+		computedSHA, err := ComputeHostedBinarySHA256(h.cfg.AgentBinDir, filename)
+		if err == nil {
+			if shaHex == "" {
+				shaHex = computedSHA
+			}
+			if base == "" {
+				return model.AdminUpdateNodeResult{
+					NodeID:  nodeID,
+					Sent:    false,
+					Message: "无法确定 Agent 下载地址，请配置 agent_download_base_url 或自定义下载地址",
+				}
+			}
+			downloadURL = base + "/" + filename
+		} else if strings.TrimSpace(h.cfg.AgentDownloadBaseURL) != "" {
+			downloadURL = base + "/" + filename
+		} else {
+			return model.AdminUpdateNodeResult{
+				NodeID:  nodeID,
+				Sent:    false,
+				Message: fmt.Sprintf("服务端未托管对应平台二进制文件: %s", filename),
+			}
+		}
+	}
+
+	pending := model.AgentUpdateState{
+		TargetVersion: targetVersion,
+		State:         "pending",
+		Message:       "已下发更新指令",
+		UpdatedAtMs:   time.Now().UnixMilli(),
+	}
+	if pendingBytes, err := json.Marshal(pending); err == nil {
+		_, _ = h.updatesKV.Put(ctx, natsauth.SanitizeSubjectToken(nodeID), pendingBytes)
+	}
+
+	cmdPayload, err := json.Marshal(model.AgentUpdateCommand{
+		Version:     targetVersion,
+		DownloadURL: downloadURL,
+		SHA256:      shaHex,
+		Force:       req.Force,
+	})
+	if err != nil {
+		return model.AdminUpdateNodeResult{
+			NodeID:  nodeID,
+			Sent:    false,
+			Message: err.Error(),
+		}
+	}
+
+	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".update"
+	if err := h.broker.Conn().Publish(subj, cmdPayload); err != nil {
+		return model.AdminUpdateNodeResult{
+			NodeID:  nodeID,
+			Sent:    false,
+			Message: "下发更新指令失败: " + err.Error(),
+		}
+	}
+
+	h.logger.Info("dispatched agent self-update over NATS",
+		"node_id", nodeID,
+		"target_version", targetVersion,
+		"download_url", downloadURL,
+		"force", req.Force,
+	)
+	return model.AdminUpdateNodeResult{
+		NodeID:  nodeID,
+		Sent:    true,
+		Message: "已下发更新指令",
 	}
 }
 
-// ListNodes returns all authoritative nodes from DB merged with live session telemetry.
+// TriggerBatchAgentUpdate pushes a self-update command to selected node IDs or all online nodes.
+func (h *Hub) TriggerBatchAgentUpdate(req model.AdminTriggerUpdateRequest, fallbackDownloadBase string) []model.AdminUpdateNodeResult {
+	targetIDs := req.NodeIDs
+	if len(targetIDs) == 0 {
+		for _, n := range h.ListNodes() {
+			if n.Status == "online" {
+				targetIDs = append(targetIDs, n.ID)
+			}
+		}
+		sort.Strings(targetIDs)
+	}
+
+	results := make([]model.AdminUpdateNodeResult, 0, len(targetIDs))
+	for _, id := range targetIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		results = append(results, h.TriggerAgentUpdate(id, req, fallbackDownloadBase))
+	}
+	return results
+}
+
+// ListNodes returns all authoritative nodes from DB merged with live NATS KV telemetry.
 func (h *Hub) ListNodes() []model.NodeInfo {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -715,7 +345,6 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 		return nil
 	}
 
-	h.mu.RLock()
 	nodes := make([]model.NodeInfo, 0, len(recs))
 	for _, rec := range recs {
 		info := model.NodeInfo{
@@ -728,38 +357,35 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 			Enabled:        rec.Enabled,
 			Notes:          rec.Notes,
 			Token:          rec.Token,
+			Creds:          rec.Creds,
 			CreatedAtMs:    rec.CreatedAtMs,
 			UpdatedAtMs:    rec.UpdatedAtMs,
 			Status:         "offline",
 			Capabilities:   []model.ProbeType{model.ProbePing, model.ProbeTcping, model.ProbeHTTP, model.ProbeTraceroute, model.ProbeDNS},
 		}
-		if sess, ok := h.sessions[rec.ID]; ok {
-			live := sess.getInfo()
+		if hb, ok := h.getNodeHeartbeat(ctx, rec.ID); ok {
 			info.Status = "online"
-			info.IPv4 = live.IPv4
-			info.IPv6 = live.IPv6
-			info.Capabilities = live.Capabilities
-			info.MaxConcurrency = live.MaxConcurrency
-			info.ActiveTasks = live.ActiveTasks
-			info.CPUPercent = live.CPUPercent
-			info.MemPercent = live.MemPercent
-			info.Version = live.Version
-			info.LastSeenUnixMs = live.LastSeenUnixMs
-			info.ConnectedAtMs = live.ConnectedAtMs
-			info.Labels = live.Labels
-		} else if rt, ok := h.lastRuntime[rec.ID]; ok {
-			info.IPv4 = rt.IPv4
-			info.IPv6 = rt.IPv6
-			info.Capabilities = rt.Capabilities
-			info.Version = rt.Version
-			info.LastSeenUnixMs = rt.LastSeenUnixMs
+			info.IPv4 = hb.IPv4
+			info.IPv6 = hb.IPv6
+			if len(hb.Capabilities) > 0 {
+				info.Capabilities = hb.Capabilities
+			}
+			if hb.MaxConcurrency > 0 && (info.MaxConcurrency == 0 || hb.MaxConcurrency < info.MaxConcurrency) {
+				info.MaxConcurrency = hb.MaxConcurrency
+			}
+			info.ActiveTasks = hb.ActiveTasks
+			info.CPUPercent = hb.CPUPercent
+			info.MemPercent = hb.MemPercent
+			info.Version = hb.Version
+			info.OS = hb.OS
+			info.Arch = hb.Arch
+			info.LastSeenUnixMs = hb.TimestampUnixMs
+			info.ConnectedAtMs = hb.ConnectedAtMs
+			info.Labels = hb.Labels
 		}
+		info.UpdateStatus = h.getNodeUpdateStatus(ctx, rec.ID)
+		info.QueueDepth = h.broker.QueueDepth(rec.ID)
 		nodes = append(nodes, info)
-	}
-	h.mu.RUnlock()
-
-	for i := range nodes {
-		nodes[i].QueueDepth = h.broker.QueueDepth(nodes[i].ID)
 	}
 
 	sort.Slice(nodes, func(i, j int) bool {
@@ -777,15 +403,37 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 	return nodes
 }
 
-// OnlineCount returns the count of currently connected and enabled agents.
+// OnlineCount returns the count of currently online nodes based on NATS KV heartbeats.
 func (h *Hub) OnlineCount() int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
 	count := 0
-	for _, s := range h.sessions {
-		if s.getInfo().Enabled {
+	for _, n := range h.ListNodes() {
+		if n.Status == "online" {
 			count++
 		}
 	}
 	return count
+}
+
+// EnsureNodeCredsBackfilled ensures any existing DB node without .creds gets one issued.
+func (h *Hub) EnsureNodeCredsBackfilled(ctx context.Context) error {
+	if h.authMgr == nil {
+		return nil
+	}
+	recs, err := h.store.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		if strings.TrimSpace(rec.Creds) != "" {
+			continue
+		}
+		creds, err := h.authMgr.IssueAgentCreds(rec.ID)
+		if err != nil {
+			return fmt.Errorf("backfill creds for %s: %w", rec.ID, err)
+		}
+		if _, err := h.store.UpdateCreds(ctx, rec.ID, creds); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
 }

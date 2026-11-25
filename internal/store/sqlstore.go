@@ -96,15 +96,28 @@ func (s *SQLStore) migrate(ctx context.Context) error {
 			asn BIGINT NOT NULL DEFAULT 0,
 			max_concurrency INTEGER NOT NULL DEFAULT 8,
 			token TEXT NOT NULL UNIQUE,
+			creds TEXT NOT NULL DEFAULT '',
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			notes TEXT NOT NULL DEFAULT '',
 			created_at_ms BIGINT NOT NULL,
 			updated_at_ms BIGINT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_nodes_token ON nodes(token)`,
+		`CREATE TABLE IF NOT EXISTS settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at_ms BIGINT NOT NULL
+		)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	// Backward-compatible migration for existing databases lacking the creds column.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE nodes ADD COLUMN creds TEXT NOT NULL DEFAULT ''`); err != nil {
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
 			return err
 		}
 	}
@@ -164,13 +177,13 @@ func (s *SQLStore) CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord
 	cp.UpdatedAtMs = now
 
 	q := s.rebind(`INSERT INTO nodes (
-		id, name, region, node_group, asn, max_concurrency, token, enabled, notes, created_at_ms, updated_at_ms
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		id, name, region, node_group, asn, max_concurrency, token, creds, enabled, notes, created_at_ms, updated_at_ms
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 
 	_, err := s.db.ExecContext(
 		ctx, q,
 		cp.ID, cp.Name, cp.Region, cp.Group, int64(cp.ASN), int(cp.MaxConcurrency),
-		cp.Token, cp.Enabled, cp.Notes, cp.CreatedAtMs, cp.UpdatedAtMs,
+		cp.Token, cp.Creds, cp.Enabled, cp.Notes, cp.CreatedAtMs, cp.UpdatedAtMs,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -187,7 +200,7 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (*NodeRecord, error)
 	var maxConc int
 	err := scanner.Scan(
 		&rec.ID, &rec.Name, &rec.Region, &rec.Group, &asn, &maxConc,
-		&rec.Token, &rec.Enabled, &rec.Notes, &rec.CreatedAtMs, &rec.UpdatedAtMs,
+		&rec.Token, &rec.Creds, &rec.Enabled, &rec.Notes, &rec.CreatedAtMs, &rec.UpdatedAtMs,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -200,7 +213,7 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (*NodeRecord, error)
 	return &rec, nil
 }
 
-const selectNodeCols = `id, name, region, node_group, asn, max_concurrency, token, enabled, notes, created_at_ms, updated_at_ms`
+const selectNodeCols = `id, name, region, node_group, asn, max_concurrency, token, creds, enabled, notes, created_at_ms, updated_at_ms`
 
 // GetNode fetches a node record by ID.
 func (s *SQLStore) GetNode(ctx context.Context, id string) (*NodeRecord, error) {
@@ -292,7 +305,7 @@ func (s *SQLStore) UpdateNode(ctx context.Context, id string, patch NodePatch) (
 	return cur, nil
 }
 
-// RotateToken replaces a node's communication token with a fresh random token.
+// RotateToken replaces a node's install-script token with a fresh random token.
 func (s *SQLStore) RotateToken(ctx context.Context, id string) (*NodeRecord, error) {
 	cur, err := s.GetNode(ctx, id)
 	if err != nil {
@@ -303,6 +316,27 @@ func (s *SQLStore) RotateToken(ctx context.Context, id string) (*NodeRecord, err
 
 	q := s.rebind(`UPDATE nodes SET token = ?, updated_at_ms = ? WHERE id = ?`)
 	res, err := s.db.ExecContext(ctx, q, cur.Token, cur.UpdatedAtMs, id)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return cur, nil
+}
+
+// UpdateCreds stores a newly signed NATS .creds bundle and rotates the install token.
+func (s *SQLStore) UpdateCreds(ctx context.Context, id, creds string) (*NodeRecord, error) {
+	cur, err := s.GetNode(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	cur.Creds = creds
+	cur.Token = GenerateNodeToken()
+	cur.UpdatedAtMs = time.Now().UnixMilli()
+
+	q := s.rebind(`UPDATE nodes SET creds = ?, token = ?, updated_at_ms = ? WHERE id = ?`)
+	res, err := s.db.ExecContext(ctx, q, cur.Creds, cur.Token, cur.UpdatedAtMs, id)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +357,32 @@ func (s *SQLStore) DeleteNode(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// GetSetting retrieves a persisted global setting value and its update timestamp.
+func (s *SQLStore) GetSetting(ctx context.Context, key string) (string, int64, error) {
+	q := s.rebind(`SELECT value, updated_at_ms FROM settings WHERE key = ?`)
+	var value string
+	var updatedAtMs int64
+	if err := s.db.QueryRowContext(ctx, q, key).Scan(&value, &updatedAtMs); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", 0, ErrNotFound
+		}
+		return "", 0, err
+	}
+	return value, updatedAtMs, nil
+}
+
+// SetSetting upserts a persisted global setting value and returns the update timestamp.
+func (s *SQLStore) SetSetting(ctx context.Context, key, value string) (int64, error) {
+	now := time.Now().UnixMilli()
+	q := s.rebind(`INSERT INTO settings (key, value, updated_at_ms)
+		VALUES (?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms`)
+	if _, err := s.db.ExecContext(ctx, q, key, value, now); err != nil {
+		return 0, err
+	}
+	return now, nil
 }
 
 // Close closes the underlying database pool.

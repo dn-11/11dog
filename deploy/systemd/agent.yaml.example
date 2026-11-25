@@ -1,12 +1,17 @@
-# 11Dog Edge Agent Configuration (/etc/11dog/agent.yaml)
-# 节点身份（名称/区域/网络组/ASN/并发配额）由控制端数据库统一下发，无需在节点侧配置。
-# 边缘节点仅需提供控制端反连 WebSocket 地址（ws:// 或 wss://）与在后台生成的节点专属通信 Token。
-
-server_addr: "wss://11dog.dn11.example/api/v1/agent/ws"
-token: "dog_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
-tls_insecure_skip_verify: false
-tls_ca_file: ""
-
-heartbeat_interval_sec: 10
+# 11Dog Edge Probe Agent (Direct NATS JetStream + Decentralized JWT/NKey .creds)
+nats_addr: "nats://127.0.0.1:4222"
+creds_file: "/etc/11dog/agent.creds"
+stream_name: "DOG_TASKS"
 max_concurrency: 8
+heartbeat_interval_sec: 10
+
+# Optional TLS settings (for tls:// or wss:// NATS endpoints)
+tls_ca_file: ""
+tls_insecure_skip_verify: false
+
+capabilities:
+  - ping
+  - tcping
+  - http
+  - traceroute
+  - dns

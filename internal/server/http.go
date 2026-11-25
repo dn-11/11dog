@@ -17,23 +17,18 @@ import (
 	"github.com/11dog/11dog/internal/config"
 	"github.com/11dog/11dog/internal/model"
 	"github.com/11dog/11dog/internal/store"
-	"github.com/11dog/11dog/internal/wsgrpc"
 	"github.com/11dog/11dog/web"
 )
 
 // Version is set via ldflags at build time.
 var Version = "dev"
 
-// NewHTTPHandler constructs the complete HTTP API + SSE + reverse-gRPC WebSocket + hosted script + embedded SPA router.
-func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, nodeStore store.NodeStore, limiter *IPRateLimiter, logger *slog.Logger, wsHandler http.Handler) http.Handler {
+// NewHTTPHandler constructs the complete HTTP API + SSE + hosted script + embedded SPA router.
+func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, nodeStore store.NodeStore, limiter *IPRateLimiter, logger *slog.Logger) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	mux := http.NewServeMux()
-
-	if wsHandler != nil {
-		mux.Handle("GET "+wsgrpc.DefaultPath, wsHandler)
-	}
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
@@ -49,7 +44,7 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		_, _ = io.WriteString(w, orch.MetricsText())
 	})
 
-	mux.HandleFunc("GET /scripts/install.sh", ServeInstallScript(cfg))
+	mux.HandleFunc("GET /scripts/install.sh", ServeInstallScript(cfg, nodeStore))
 	mux.HandleFunc("GET /downloads/{filename}", ServeAgentBinary(cfg))
 
 	mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, _ *http.Request) {
@@ -90,6 +85,22 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		writeJSON(w, http.StatusOK, orch.AdminOverview())
 	})
 
+	mux.HandleFunc("GET /api/v1/admin/nats-config", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(cfg, w, r) {
+			return
+		}
+		authMgr := hub.AuthManager()
+		if authMgr == nil {
+			writeError(w, http.StatusServiceUnavailable, "NATS JWT 密钥管理器未初始化")
+			return
+		}
+		writeJSON(w, http.StatusOK, model.AdminNATSConfigResponse{
+			OperatorPub: authMgr.OperatorPub(),
+			AccountPub:  authMgr.AccountPub(),
+			Config:      authMgr.RenderNATSServerConfig("/data/jetstream"),
+		})
+	})
+
 	mux.HandleFunc("GET /api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Request) {
 		if !requireAdmin(cfg, w, r) {
 			return
@@ -115,13 +126,23 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			writeError(w, http.StatusBadRequest, "节点名称不能为空")
 			return
 		}
+		nodeID := strings.TrimSpace(req.ID)
+		if nodeID == "" {
+			nodeID = store.GenerateNodeID()
+		}
+		creds, err := hub.AuthManager().IssueAgentCreds(nodeID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "签发 NATS .creds 失败: "+err.Error())
+			return
+		}
 		rec, err := nodeStore.CreateNode(r.Context(), &store.NodeRecord{
-			ID:             strings.TrimSpace(req.ID),
+			ID:             nodeID,
 			Name:           strings.TrimSpace(req.Name),
 			Region:         strings.TrimSpace(req.Region),
 			Group:          strings.TrimSpace(req.Group),
 			ASN:            req.ASN,
 			MaxConcurrency: req.MaxConcurrency,
+			Creds:          creds,
 			Enabled:        true,
 			Notes:          strings.TrimSpace(req.Notes),
 		})
@@ -164,7 +185,6 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		hub.SyncNode(rec)
 		writeJSON(w, http.StatusOK, nodeRecordToInfo(rec))
 	})
 
@@ -173,7 +193,12 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			return
 		}
 		nodeID := r.PathValue("id")
-		rec, err := nodeStore.RotateToken(r.Context(), nodeID)
+		creds, err := hub.AuthManager().IssueAgentCreds(nodeID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "重新签发 NATS .creds 失败: "+err.Error())
+			return
+		}
+		rec, err := nodeStore.UpdateCreds(r.Context(), nodeID, creds)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "节点不存在")
@@ -182,7 +207,6 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		hub.RevokeNodeSession(nodeID)
 		writeJSON(w, http.StatusOK, nodeRecordToInfo(rec))
 	})
 
@@ -199,7 +223,6 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		hub.RevokeNodeSession(nodeID)
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "node_id": nodeID})
 	})
 
@@ -213,6 +236,90 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"disconnected": true, "node_id": nodeID})
+	})
+
+	mux.HandleFunc("POST /api/v1/admin/nodes/update", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(cfg, w, r) {
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var req model.AdminTriggerUpdateRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "请求参数解析失败: "+err.Error())
+				return
+			}
+		}
+		results := hub.TriggerBatchAgentUpdate(req, requestDownloadBase(r))
+		sentCount := 0
+		for _, res := range results {
+			if res.Sent {
+				sentCount++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"results": results,
+			"total":   len(results),
+			"sent":    sentCount,
+		})
+	})
+
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/update", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(cfg, w, r) {
+			return
+		}
+		nodeID := r.PathValue("id")
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var req model.AdminTriggerUpdateRequest
+		if r.Body != nil {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+				writeError(w, http.StatusBadRequest, "请求参数解析失败: "+err.Error())
+				return
+			}
+		}
+		res := hub.TriggerAgentUpdate(nodeID, req, requestDownloadBase(r))
+		if !res.Sent {
+			statusCode := http.StatusBadRequest
+			if strings.Contains(res.Message, "不在线") {
+				statusCode = http.StatusNotFound
+			}
+			writeError(w, statusCode, res.Message)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+	})
+
+	mux.HandleFunc("GET /api/v1/admin/target-policy", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(cfg, w, r) {
+			return
+		}
+		if orch.TargetPolicy() == nil {
+			writeJSON(w, http.StatusOK, model.TargetPolicy{AllowRules: []string{}, DenyRules: []string{}})
+			return
+		}
+		writeJSON(w, http.StatusOK, orch.TargetPolicy().Get())
+	})
+
+	mux.HandleFunc("PUT /api/v1/admin/target-policy", func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(cfg, w, r) {
+			return
+		}
+		if orch.TargetPolicy() == nil {
+			writeError(w, http.StatusServiceUnavailable, "目标限制策略模块未初始化")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var req model.TargetPolicy
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "请求参数解析失败: "+err.Error())
+			return
+		}
+		updated, err := orch.TargetPolicy().Update(r.Context(), req)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, updated)
 	})
 
 	mux.HandleFunc("POST /api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +455,17 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 	return withCORS(mux)
 }
 
+func requestDownloadBase(r *http.Request) string {
+	if r == nil || r.Host == "" {
+		return ""
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s/downloads", scheme, r.Host)
+}
+
 func newSPAHandler(fsys fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +516,7 @@ func nodeRecordToInfo(rec *store.NodeRecord) model.NodeInfo {
 		Enabled:        rec.Enabled,
 		Notes:          rec.Notes,
 		Token:          rec.Token,
+		Creds:          rec.Creds,
 		CreatedAtMs:    rec.CreatedAtMs,
 		UpdatedAtMs:    rec.UpdatedAtMs,
 		Status:         "offline",

@@ -30,15 +30,11 @@ func main() {
 
 	var (
 		configPath     = flag.String("config", "", "path to agent YAML configuration")
-		serverAddr     = flag.String("server", "", "override server WebSocket reverse-gRPC URL (e.g. wss://host/api/v1/agent/ws)")
-		token          = flag.String("token", "", "override agent auth token")
-		nodeID         = flag.String("node-id", "", "override unique node ID")
-		name           = flag.String("name", "", "override display name")
-		region         = flag.String("region", "", "override region label (e.g. 香港, 上海, 东京)")
-		group          = flag.String("group", "", "override ISP/operator group (e.g. DN11-IX, BGP)")
-		asn            = flag.Uint("asn", 0, "override DN11 ASN")
+		natsAddr       = flag.String("nats", "", "override NATS server URL (e.g. nats://host:4222 or wss://host/nats)")
+		credsFile      = flag.String("creds", "", "override path to NATS .creds JWT/NKey file")
+		streamName     = flag.String("stream", "", "override NATS JetStream task stream name")
 		maxConcurrency = flag.Uint("max-concurrency", 0, "override max concurrent probe tasks")
-		tlsInsecure    = flag.Bool("insecure", false, "skip TLS certificate verification for wss://")
+		tlsInsecure    = flag.Bool("insecure", false, "skip TLS certificate verification")
 		showVer        = flag.Bool("version", false, "print agent version and exit")
 	)
 	flag.Parse()
@@ -55,26 +51,14 @@ func main() {
 		logger.Error("failed to load agent config", "error", err)
 		os.Exit(1)
 	}
-	if *serverAddr != "" {
-		cfg.ServerAddr = *serverAddr
+	if *natsAddr != "" {
+		cfg.NATSAddr = *natsAddr
 	}
-	if *token != "" {
-		cfg.Token = *token
+	if *credsFile != "" {
+		cfg.CredsFile = *credsFile
 	}
-	if *nodeID != "" {
-		cfg.NodeID = *nodeID
-	}
-	if *name != "" {
-		cfg.Name = *name
-	}
-	if *region != "" {
-		cfg.Region = *region
-	}
-	if *group != "" {
-		cfg.Group = *group
-	}
-	if *asn > 0 {
-		cfg.ASN = uint32(*asn)
+	if *streamName != "" {
+		cfg.StreamName = *streamName
 	}
 	if *maxConcurrency > 0 {
 		cfg.MaxConcurrency = uint32(*maxConcurrency)

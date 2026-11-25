@@ -1,11 +1,16 @@
 import type {
+  AdminBatchUpdateResponse,
   AdminCreateNodeRequest,
+  AdminNATSConfigResponse,
   AdminNodeInfo,
   AdminOverview,
+  AdminTriggerUpdateRequest,
   AdminUpdateNodeRequest,
+  AdminUpdateNodeResult,
   CreateTaskRequest,
   MetaInfo,
   PublicNodeInfo,
+  TargetPolicy,
   TaskEvent,
   TaskSnapshot
 } from '@/types/api'
@@ -39,6 +44,14 @@ export async function fetchAdminOverview(adminToken: string): Promise<AdminOverv
   })
   if (!resp.ok) throw new Error(await parseError(resp))
   return (await resp.json()) as AdminOverview
+}
+
+export async function fetchAdminNATSConfig(adminToken: string): Promise<AdminNATSConfigResponse> {
+  const resp = await fetch('/api/v1/admin/nats-config', {
+    headers: { 'X-Admin-Token': adminToken }
+  })
+  if (!resp.ok) throw new Error(await parseError(resp))
+  return (await resp.json()) as AdminNATSConfigResponse
 }
 
 export async function fetchAdminNodes(adminToken: string): Promise<AdminNodeInfo[]> {
@@ -106,6 +119,63 @@ export async function deleteAdminNode(adminToken: string, nodeID: string): Promi
     headers: { 'X-Admin-Token': adminToken }
   })
   if (!resp.ok) throw new Error(await parseError(resp))
+}
+
+export async function triggerAdminNodeUpdate(
+  adminToken: string,
+  nodeID: string,
+  req: AdminTriggerUpdateRequest = {}
+): Promise<AdminUpdateNodeResult> {
+  const resp = await fetch(`/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/update`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Token': adminToken
+    },
+    body: JSON.stringify(req)
+  })
+  if (!resp.ok) throw new Error(await parseError(resp))
+  return (await resp.json()) as AdminUpdateNodeResult
+}
+
+export async function triggerAdminBatchUpdate(
+  adminToken: string,
+  req: AdminTriggerUpdateRequest = {}
+): Promise<AdminBatchUpdateResponse> {
+  const resp = await fetch('/api/v1/admin/nodes/update', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Token': adminToken
+    },
+    body: JSON.stringify(req)
+  })
+  if (!resp.ok) throw new Error(await parseError(resp))
+  return (await resp.json()) as AdminBatchUpdateResponse
+}
+
+export async function fetchAdminTargetPolicy(adminToken: string): Promise<TargetPolicy> {
+  const resp = await fetch('/api/v1/admin/target-policy', {
+    headers: { 'X-Admin-Token': adminToken }
+  })
+  if (!resp.ok) throw new Error(await parseError(resp))
+  return (await resp.json()) as TargetPolicy
+}
+
+export async function updateAdminTargetPolicy(
+  adminToken: string,
+  policy: TargetPolicy
+): Promise<TargetPolicy> {
+  const resp = await fetch('/api/v1/admin/target-policy', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Token': adminToken
+    },
+    body: JSON.stringify(policy)
+  })
+  if (!resp.ok) throw new Error(await parseError(resp))
+  return (await resp.json()) as TargetPolicy
 }
 
 export async function createTask(req: CreateTaskRequest): Promise<TaskSnapshot> {

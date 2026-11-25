@@ -1,6 +1,4 @@
 http_listen_addr: ":8080"
-# 对外展示的 Agent 反连 WebSocket 地址（留空则自动使用同源 ws(s)://<当前域名>/api/v1/agent/ws）
-public_ws_addr: ""
 # 托管供 /scripts/install.sh 下载的 Agent 二进制目录
 agent_bin_dir: "./bin"
 agent_download_base_url: ""
@@ -16,12 +14,20 @@ db:
   driver: "sqlite"
   dsn: "./data/11dog.db"
 
-mq:
-  driver: "memory" # memory | nats
-  nats_url: "nats://127.0.0.1:4222"
+nats:
+  # 外部 NATS JetStream 地址（支持 nats://, tls://, ws://, wss://）
+  url: "nats://127.0.0.1:4222"
+  # 对外展示给 Agent 安装脚本的 NATS 地址（留空则复用 url）
+  public_url: ""
   stream_name: "DOG_TASKS"
   max_queue_per_node: 20
   task_ttl_sec: 60
+  # 留空时首次启动自动生成 Operator/Account Seed 并持久化到数据库 settings 表；
+  # 可运行 `11dog-server nats-config` 或在后台点击「导出 NATS 配置」生成 nats-server.conf
+  operator_seed: ""
+  account_seed: ""
+  tls_ca_file: ""
+  tls_insecure_skip_verify: false
 
 limits:
   rate_limit_rpm: 180

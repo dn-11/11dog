@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -18,7 +17,7 @@ import (
 	"github.com/11dog/11dog/internal/dn11"
 	"github.com/11dog/11dog/internal/model"
 	"github.com/11dog/11dog/internal/mq"
-	"github.com/11dog/11dog/internal/wsgrpc"
+	"github.com/11dog/11dog/internal/mq/nats"
 )
 
 var (
@@ -37,13 +36,11 @@ type taskRecord struct {
 // Orchestrator validates diagnostic tasks, dispatches them through the MQ buffer,
 // aggregates live results into task snapshots, and exposes Prometheus metrics.
 type Orchestrator struct {
-	cfg     *config.ServerConfig
-	broker  mq.Broker
-	hub     *Hub
-	dn11Reg *dn11.Registry
-
-	allowedPrefixes []netip.Prefix
-	deniedPrefixes  []netip.Prefix
+	cfg       *config.ServerConfig
+	broker    mq.Broker
+	hub       *Hub
+	dn11Reg   *dn11.Registry
+	policyMgr *TargetPolicyManager
 
 	mu    sync.RWMutex
 	tasks map[string]*taskRecord
@@ -56,33 +53,28 @@ type Orchestrator struct {
 }
 
 // NewOrchestrator constructs a task orchestrator wired to Hub and Broker.
-func NewOrchestrator(cfg *config.ServerConfig, broker mq.Broker, hub *Hub, dn11Reg *dn11.Registry) (*Orchestrator, error) {
+func NewOrchestrator(cfg *config.ServerConfig, broker *nats.Broker, hub *Hub, dn11Reg *dn11.Registry) (*Orchestrator, error) {
+	policyMgr, err := NewTargetPolicyManager(context.Background(), hub.store, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("init target policy manager: %w", err)
+	}
+	if broker != nil {
+		policyMgr.AttachNATS(broker.Conn())
+	}
 	o := &Orchestrator{
-		cfg:     cfg,
-		broker:  broker,
-		hub:     hub,
-		dn11Reg: dn11Reg,
-		tasks:   make(map[string]*taskRecord),
+		cfg:       cfg,
+		broker:    broker,
+		hub:       hub,
+		dn11Reg:   dn11Reg,
+		policyMgr: policyMgr,
+		tasks:     make(map[string]*taskRecord),
 	}
-	for _, cidr := range cfg.Limits.AllowedCIDRs {
-		p, err := netip.ParsePrefix(cidr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid allowed_cidr %q: %w", cidr, err)
-		}
-		o.allowedPrefixes = append(o.allowedPrefixes, p)
-	}
-	for _, cidr := range cfg.Limits.DeniedCIDRs {
-		p, err := netip.ParsePrefix(cidr)
-		if err != nil {
-			return nil, fmt.Errorf("invalid denied_cidr %q: %w", cidr, err)
-		}
-		o.deniedPrefixes = append(o.deniedPrefixes, p)
-	}
-	hub.SetMetricsCallbacks(HubMetricsCallbacks{
-		OnExpired:   func() { o.subtasksExpiredTotal.Add(1) },
-		OnCompleted: func() { o.subtasksCompletedTotal.Add(1) },
-	})
 	return o, nil
+}
+
+// TargetPolicy returns the in-memory cached target restriction policy manager.
+func (o *Orchestrator) TargetPolicy() *TargetPolicyManager {
+	return o.policyMgr
 }
 
 // StartReaper periodically prunes expired task snapshots from memory.
@@ -242,30 +234,10 @@ func (o *Orchestrator) validateAndNormalize(req *model.CreateTaskRequest) (uint3
 		req.Params.DNS.RecordType = rt
 	}
 
-	// Enforce CIDR allow/deny rules when target is a literal IP.
-	hostOnly := req.Target
-	if u, err := url.Parse(req.Target); err == nil && u.Hostname() != "" {
-		hostOnly = u.Hostname()
-	}
-	hostOnly = strings.Trim(hostOnly, "[]")
-	if addr, err := netip.ParseAddr(hostOnly); err == nil {
-		addr = addr.Unmap()
-		for _, p := range o.deniedPrefixes {
-			if p.Contains(addr) {
-				return 0, fmt.Errorf("%w: target IP %s is in denied CIDR %s", ErrInvalidRequest, addr, p)
-			}
-		}
-		if len(o.allowedPrefixes) > 0 {
-			allowed := false
-			for _, p := range o.allowedPrefixes {
-				if p.Contains(addr) {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				return 0, fmt.Errorf("%w: target IP %s is outside allowed DN11 CIDRs", ErrInvalidRequest, addr)
-			}
+	// Enforce global target restrictions (domain wildcards & CIDRs) from in-memory cache.
+	if o.policyMgr != nil {
+		if err := o.policyMgr.CheckTarget(req.Target); err != nil {
+			return 0, err
 		}
 	}
 
@@ -342,7 +314,7 @@ func (o *Orchestrator) CreateTask(ctx context.Context, req model.CreateTaskReque
 
 	taskID := newID()
 	now := time.Now()
-	queueTTL := time.Duration(o.cfg.MQ.TaskTTLSec) * time.Second
+	queueTTL := time.Duration(o.cfg.NATS.TaskTTLSec) * time.Second
 	if queueTTL < time.Duration(timeoutMs)*time.Millisecond+10*time.Second {
 		queueTTL = time.Duration(timeoutMs)*time.Millisecond + 15*time.Second
 	}
@@ -526,6 +498,9 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 				cur.Traceroute = &model.TracerouteResult{}
 			}
 			hop := *ev.Progress.TracerouteHop
+			if hop.IP != "" && hop.DN11 == nil && o.dn11Reg != nil {
+				hop.DN11 = o.dn11Reg.Lookup(hop.IP)
+			}
 			replaced := false
 			for i := range cur.Traceroute.Hops {
 				if cur.Traceroute.Hops[i].Hop == hop.Hop {
@@ -549,6 +524,7 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 		}
 
 	case "result":
+		wasTerminal := cur.Status.IsTerminal()
 		if ev.Result != nil {
 			copied := *ev.Result
 			if copied.NodeName == "" {
@@ -566,7 +542,29 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 			if copied.Type == "" {
 				copied.Type = cur.Type
 			}
+			if o.dn11Reg != nil {
+				if copied.ResolvedIP != "" && copied.ResolvedDN11 == nil {
+					copied.ResolvedDN11 = o.dn11Reg.Lookup(copied.ResolvedIP)
+				}
+				if copied.Traceroute != nil {
+					for i := range copied.Traceroute.Hops {
+						if copied.Traceroute.Hops[i].IP != "" && copied.Traceroute.Hops[i].DN11 == nil {
+							copied.Traceroute.Hops[i].DN11 = o.dn11Reg.Lookup(copied.Traceroute.Hops[i].IP)
+						}
+					}
+				}
+			}
 			rec.snapshot.Results[ev.NodeID] = &copied
+			if !wasTerminal && copied.Status.IsTerminal() {
+				switch copied.Status {
+				case model.StatusExpired:
+					o.subtasksExpiredTotal.Add(1)
+				case model.StatusOverloaded:
+					o.subtasksOverloadTotal.Add(1)
+				default:
+					o.subtasksCompletedTotal.Add(1)
+				}
+			}
 		} else {
 			cur.Status = ev.Status
 			cur.FinishedUnixMs = time.Now().UnixMilli()
@@ -696,13 +694,17 @@ func (o *Orchestrator) AdminOverview() model.AdminOverview {
 			offline++
 		}
 	}
+	var accountPub string
+	if o.hub != nil && o.hub.AuthManager() != nil {
+		accountPub = o.hub.AuthManager().AccountPub()
+	}
 	return model.AdminOverview{
 		Version:                Version,
 		DBDriver:               o.cfg.DB.Driver,
-		MQDriver:               o.cfg.MQ.Driver,
-		MaxQueuePerNode:        o.cfg.MQ.MaxQueuePerNode,
-		WSPath:                 wsgrpc.DefaultPath,
-		PublicWSAddr:           o.cfg.PublicWSAddr,
+		NATSURL:                o.cfg.NATS.URL,
+		PublicNATSURL:          o.cfg.NATS.PublicURL,
+		NATSAccountPub:         accountPub,
+		MaxQueuePerNode:        o.cfg.NATS.MaxQueuePerNode,
 		AgentDownloadBaseURL:   o.cfg.AgentDownloadBaseURL,
 		HostedBinaries:         ListHostedBinaries(o.cfg.AgentBinDir),
 		OnlineNodes:            online,

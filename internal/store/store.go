@@ -14,7 +14,7 @@ var (
 	ErrConflict = errors.New("node already exists")
 )
 
-// NodeRecord represents the authoritative server-side identity and settings of a probe node.
+// NodeRecord represents the authoritative server-side identity and NATS credentials of a probe node.
 type NodeRecord struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
@@ -23,6 +23,7 @@ type NodeRecord struct {
 	ASN            uint32 `json:"asn"`
 	MaxConcurrency uint32 `json:"max_concurrency"`
 	Token          string `json:"token"`
+	Creds          string `json:"creds"`
 	Enabled        bool   `json:"enabled"`
 	Notes          string `json:"notes"`
 	CreatedAtMs    int64  `json:"created_at_ms"`
@@ -40,7 +41,7 @@ type NodePatch struct {
 	Notes          *string
 }
 
-// NodeStore persists authoritative node identities and per-node authentication tokens.
+// NodeStore persists authoritative node identities, per-node authentication tokens, and global settings.
 type NodeStore interface {
 	CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord, error)
 	GetNode(ctx context.Context, id string) (*NodeRecord, error)
@@ -48,7 +49,10 @@ type NodeStore interface {
 	ListNodes(ctx context.Context) ([]*NodeRecord, error)
 	UpdateNode(ctx context.Context, id string, patch NodePatch) (*NodeRecord, error)
 	RotateToken(ctx context.Context, id string) (*NodeRecord, error)
+	UpdateCreds(ctx context.Context, id, creds string) (*NodeRecord, error)
 	DeleteNode(ctx context.Context, id string) error
+	GetSetting(ctx context.Context, key string) (string, int64, error)
+	SetSetting(ctx context.Context, key, value string) (int64, error)
 	Close() error
 }
 

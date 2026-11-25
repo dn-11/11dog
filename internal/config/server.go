@@ -12,11 +12,7 @@ import (
 
 // ServerConfig holds all configuration for the 11dog control-plane server.
 type ServerConfig struct {
-	HTTPListenAddr string `yaml:"http_listen_addr"`
-	// PublicWSAddr optionally overrides the WebSocket reverse-gRPC URL written into
-	// hosted install scripts (e.g. "wss://11dog.dn11.example/api/v1/agent/ws").
-	// When empty, it is derived from the incoming HTTP request origin.
-	PublicWSAddr         string             `yaml:"public_ws_addr"`
+	HTTPListenAddr       string             `yaml:"http_listen_addr"`
 	AgentBinDir          string             `yaml:"agent_bin_dir"`
 	AgentDownloadBaseURL string             `yaml:"agent_download_base_url"`
 	StaticDir            string             `yaml:"static_dir"`
@@ -24,7 +20,7 @@ type ServerConfig struct {
 	NetworkName          string             `yaml:"network_name"`
 	Auth                 ServerAuthConfig   `yaml:"auth"`
 	DB                   DBConfig           `yaml:"db"`
-	MQ                   MQConfig           `yaml:"mq"`
+	NATS                 NATSConfig         `yaml:"nats"`
 	Limits               LimitsConfig       `yaml:"limits"`
 	DN11Registry         DN11RegistryConfig `yaml:"dn11_registry"`
 	DN11Prefixes         []dn11.PrefixEntry `yaml:"dn11_prefixes"`
@@ -43,16 +39,20 @@ type DBConfig struct {
 }
 
 type ServerAuthConfig struct {
-	Tokens     []string `yaml:"tokens"`
-	AdminToken string   `yaml:"admin_token"`
+	AdminToken string `yaml:"admin_token"`
 }
 
-type MQConfig struct {
-	Driver          string `yaml:"driver"` // memory | nats
-	NATSURL         string `yaml:"nats_url"`
-	StreamName      string `yaml:"stream_name"`
-	MaxQueuePerNode int    `yaml:"max_queue_per_node"`
-	TaskTTLSec      int    `yaml:"task_ttl_sec"`
+// NATSConfig configures the external NATS JetStream cluster and JWT/NKey signing authority.
+type NATSConfig struct {
+	URL                   string `yaml:"url"`
+	PublicURL             string `yaml:"public_url"`
+	StreamName            string `yaml:"stream_name"`
+	MaxQueuePerNode       int    `yaml:"max_queue_per_node"`
+	TaskTTLSec            int    `yaml:"task_ttl_sec"`
+	OperatorSeed          string `yaml:"operator_seed"`
+	AccountSeed           string `yaml:"account_seed"`
+	TLSCAFile             string `yaml:"tls_ca_file"`
+	TLSInsecureSkipVerify bool   `yaml:"tls_insecure_skip_verify"`
 }
 
 type LimitsConfig struct {
@@ -78,9 +78,8 @@ func DefaultServerConfig() *ServerConfig {
 			Driver: "sqlite",
 			DSN:    "./data/11dog.db",
 		},
-		MQ: MQConfig{
-			Driver:          "memory",
-			NATSURL:         "nats://127.0.0.1:4222",
+		NATS: NATSConfig{
+			URL:             "nats://127.0.0.1:4222",
 			StreamName:      "DOG_TASKS",
 			MaxQueuePerNode: 20,
 			TaskTTLSec:      60,
@@ -128,17 +127,17 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	if cfg.AgentBinDir == "" {
 		cfg.AgentBinDir = "./bin"
 	}
-	if cfg.MQ.Driver == "" {
-		cfg.MQ.Driver = "memory"
+	if cfg.NATS.URL == "" {
+		cfg.NATS.URL = "nats://127.0.0.1:4222"
 	}
-	if cfg.MQ.MaxQueuePerNode <= 0 {
-		cfg.MQ.MaxQueuePerNode = 20
+	if cfg.NATS.StreamName == "" {
+		cfg.NATS.StreamName = "DOG_TASKS"
 	}
-	if cfg.MQ.TaskTTLSec <= 0 {
-		cfg.MQ.TaskTTLSec = 60
+	if cfg.NATS.MaxQueuePerNode <= 0 {
+		cfg.NATS.MaxQueuePerNode = 20
 	}
-	if cfg.MQ.StreamName == "" {
-		cfg.MQ.StreamName = "DOG_TASKS"
+	if cfg.NATS.TaskTTLSec <= 0 {
+		cfg.NATS.TaskTTLSec = 60
 	}
 	if cfg.Limits.DefaultTimeoutMs == 0 {
 		cfg.Limits.DefaultTimeoutMs = 15000
@@ -168,43 +167,45 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 	if v := os.Getenv("DOG_STATIC_DIR"); v != "" {
 		cfg.StaticDir = v
 	}
-	if v := os.Getenv("DOG_AGENT_TOKENS"); v != "" {
-		parts := strings.Split(v, ",")
-		tokens := make([]string, 0, len(parts))
-		for _, p := range parts {
-			if t := strings.TrimSpace(p); t != "" {
-				tokens = append(tokens, t)
-			}
-		}
-		cfg.Auth.Tokens = tokens
-	}
 	if v := os.Getenv("DOG_ADMIN_TOKEN"); v != "" {
 		cfg.Auth.AdminToken = strings.TrimSpace(v)
 	}
-	if v := os.Getenv("DOG_MQ_DRIVER"); v != "" {
-		cfg.MQ.Driver = v
-	}
 	if v := os.Getenv("DOG_NATS_URL"); v != "" {
-		cfg.MQ.NATSURL = v
+		cfg.NATS.URL = strings.TrimSpace(v)
 	}
-	if v := os.Getenv("DOG_MQ_MAX_QUEUE_PER_NODE"); v != "" {
+	if v := os.Getenv("DOG_PUBLIC_NATS_URL"); v != "" {
+		cfg.NATS.PublicURL = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_STREAM_NAME"); v != "" {
+		cfg.NATS.StreamName = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_MAX_QUEUE_PER_NODE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.MQ.MaxQueuePerNode = n
+			cfg.NATS.MaxQueuePerNode = n
 		}
 	}
-	if v := os.Getenv("DOG_MQ_TASK_TTL_SEC"); v != "" {
+	if v := os.Getenv("DOG_NATS_TASK_TTL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.MQ.TaskTTLSec = n
+			cfg.NATS.TaskTTLSec = n
 		}
+	}
+	if v := os.Getenv("DOG_NATS_OPERATOR_SEED"); v != "" {
+		cfg.NATS.OperatorSeed = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_ACCOUNT_SEED"); v != "" {
+		cfg.NATS.AccountSeed = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_TLS_CA_FILE"); v != "" {
+		cfg.NATS.TLSCAFile = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_NATS_TLS_INSECURE"); v != "" {
+		cfg.NATS.TLSInsecureSkipVerify = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("DOG_DB_DRIVER"); v != "" {
 		cfg.DB.Driver = v
 	}
 	if v := os.Getenv("DOG_DB_DSN"); v != "" {
 		cfg.DB.DSN = v
-	}
-	if v := os.Getenv("DOG_PUBLIC_WS_ADDR"); v != "" {
-		cfg.PublicWSAddr = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_AGENT_BIN_DIR"); v != "" {
 		cfg.AgentBinDir = strings.TrimSpace(v)

@@ -53,6 +53,14 @@ type DN11Match struct {
 	Prefix string `json:"prefix,omitempty"`
 }
 
+// AgentUpdateState tracks the latest self-update progress reported by an edge agent.
+type AgentUpdateState struct {
+	TargetVersion string `json:"target_version,omitempty"`
+	State         string `json:"state"` // pending | downloading | verifying | applying | restarting | up_to_date | failed
+	Message       string `json:"message,omitempty"`
+	UpdatedAtMs   int64  `json:"updated_at_ms,omitempty"`
+}
+
 // NodeInfo describes an edge probe node and its live internal telemetry (admin only).
 type NodeInfo struct {
 	ID             string            `json:"id"`
@@ -69,10 +77,14 @@ type NodeInfo struct {
 	CPUPercent     float64           `json:"cpu_percent"`
 	MemPercent     float64           `json:"mem_percent"`
 	Version        string            `json:"version"`
+	OS             string            `json:"os,omitempty"`
+	Arch           string            `json:"arch,omitempty"`
+	UpdateStatus   *AgentUpdateState `json:"update_status,omitempty"`
 	Status         string            `json:"status"` // online | offline
 	Enabled        bool              `json:"enabled"`
 	Notes          string            `json:"notes,omitempty"`
 	Token          string            `json:"token,omitempty"`
+	Creds          string            `json:"creds,omitempty"`
 	CreatedAtMs    int64             `json:"created_at_ms,omitempty"`
 	UpdatedAtMs    int64             `json:"updated_at_ms,omitempty"`
 	LastSeenUnixMs int64             `json:"last_seen_unix_ms"`
@@ -113,14 +125,38 @@ type AdminUpdateNodeRequest struct {
 	Notes          *string `json:"notes,omitempty"`
 }
 
-// AdminOverview aggregates internal server state, DB/MQ telemetry, and counters.
+// AdminTriggerUpdateRequest dispatches a self-update command to one or more online agents.
+type AdminTriggerUpdateRequest struct {
+	NodeIDs     []string `json:"node_ids,omitempty"`
+	Version     string   `json:"version,omitempty"`
+	DownloadURL string   `json:"download_url,omitempty"`
+	SHA256      string   `json:"sha256,omitempty"`
+	Force       bool     `json:"force,omitempty"`
+}
+
+// AdminUpdateNodeResult reports the dispatch result for a single node update command.
+type AdminUpdateNodeResult struct {
+	NodeID  string `json:"node_id"`
+	Sent    bool   `json:"sent"`
+	Message string `json:"message,omitempty"`
+}
+
+// TargetPolicy configures global probe target restrictions supporting domain wildcards and CIDRs.
+type TargetPolicy struct {
+	Enabled     bool     `json:"enabled"`
+	AllowRules  []string `json:"allow_rules"`
+	DenyRules   []string `json:"deny_rules"`
+	UpdatedAtMs int64    `json:"updated_at_ms,omitempty"`
+}
+
+// AdminOverview aggregates internal server state, DB/NATS telemetry, and counters.
 type AdminOverview struct {
 	Version                string   `json:"version"`
 	DBDriver               string   `json:"db_driver"`
-	MQDriver               string   `json:"mq_driver"`
+	NATSURL                string   `json:"nats_url"`
+	PublicNATSURL          string   `json:"public_nats_url,omitempty"`
+	NATSAccountPub         string   `json:"nats_account_pub,omitempty"`
 	MaxQueuePerNode        int      `json:"max_queue_per_node"`
-	WSPath                 string   `json:"ws_path"`
-	PublicWSAddr           string   `json:"public_ws_addr,omitempty"`
 	AgentDownloadBaseURL   string   `json:"agent_download_base_url,omitempty"`
 	HostedBinaries         []string `json:"hosted_binaries"`
 	OnlineNodes            int      `json:"online_nodes"`
@@ -134,6 +170,52 @@ type AdminOverview struct {
 	SubtasksOverloadTotal  int64    `json:"subtasks_overloaded_total"`
 	SubtasksExpiredTotal   int64    `json:"subtasks_expired_total"`
 	SubtasksCompletedTotal int64    `json:"subtasks_completed_total"`
+}
+
+// AdminNATSConfigResponse exposes the generated nats-server.conf snippet and JWT public keys.
+type AdminNATSConfigResponse struct {
+	OperatorPub string `json:"operator_pub"`
+	AccountPub  string `json:"account_pub"`
+	Config      string `json:"config"`
+}
+
+// AgentHeartbeat is published periodically by edge agents over Core NATS (agent.hb.<nodeID>).
+type AgentHeartbeat struct {
+	NodeID          string            `json:"node_id"`
+	IPv4            string            `json:"ipv4,omitempty"`
+	IPv6            string            `json:"ipv6,omitempty"`
+	Capabilities    []ProbeType       `json:"capabilities,omitempty"`
+	MaxConcurrency  uint32            `json:"max_concurrency"`
+	ActiveTasks     uint32            `json:"active_tasks"`
+	CPUPercent      float64           `json:"cpu_percent"`
+	MemPercent      float64           `json:"mem_percent"`
+	Version         string            `json:"version"`
+	OS              string            `json:"os,omitempty"`
+	Arch            string            `json:"arch,omitempty"`
+	TimestampUnixMs int64             `json:"timestamp_unix_ms"`
+	ConnectedAtMs   int64             `json:"connected_at_unix_ms,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+}
+
+// CancelTaskCommand is published to ctrl.node.<nodeID>.cancel.
+type CancelTaskCommand struct {
+	TaskID    string `json:"task_id"`
+	SubtaskID string `json:"subtask_id"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// AgentUpdateCommand is published to ctrl.node.<nodeID>.update.
+type AgentUpdateCommand struct {
+	Version     string `json:"version,omitempty"`
+	DownloadURL string `json:"download_url"`
+	SHA256      string `json:"sha256,omitempty"`
+	Force       bool   `json:"force,omitempty"`
+}
+
+// ReconnectCommand is published to ctrl.node.<nodeID>.reconnect.
+type ReconnectCommand struct {
+	Reason            string `json:"reason,omitempty"`
+	ReconnectAfterSec uint32 `json:"reconnect_after_sec,omitempty"`
 }
 
 // CreateTaskRequest is the HTTP payload to dispatch a network diagnostic task.
