@@ -45,7 +45,9 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		_, _ = io.WriteString(w, orch.MetricsText())
 	})
 
-	mux.HandleFunc("GET /scripts/install.sh", ServeInstallScript(cfg, nodeStore))
+	mux.HandleFunc("GET /scripts/install.sh", ServeStaticScript("install.sh"))
+	mux.HandleFunc("GET /scripts/uninstall.sh", ServeStaticScript("uninstall.sh"))
+	mux.HandleFunc("GET /scripts/creds", ServeNodeCreds(nodeStore))
 	mux.HandleFunc("GET /downloads/{filename}", ServeAgentBinary(cfg))
 
 	mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, _ *http.Request) {

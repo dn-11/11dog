@@ -503,21 +503,35 @@ func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 		t.Fatalf("expected auto-generated UUID node_id, got %+v", created)
 	}
 
-	// 2. Verify hosted install script embeds .creds and NATS WebSocket URL.
-	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&nats=wss://nats.dn11.example")
+	// 2. Verify static install script & token-authenticated .creds endpoint.
+	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh")
 	if err != nil {
 		t.Fatal(err)
 	}
 	scriptBody, _ := io.ReadAll(scriptResp.Body)
 	_ = scriptResp.Body.Close()
 	if scriptResp.StatusCode != http.StatusOK ||
-		!strings.Contains(string(scriptBody), "BEGIN NATS USER JWT") ||
-		!strings.Contains(string(scriptBody), "wss://nats.dn11.example") ||
-		!strings.Contains(string(scriptBody), "ReadWritePaths=/opt/11dog") {
-		t.Fatalf("unexpected hosted install script status=%d body=%s", scriptResp.StatusCode, scriptBody)
+		strings.Contains(string(scriptBody), "BEGIN USER NKEY SEED") ||
+		strings.Contains(string(scriptBody), created.Creds) ||
+		!strings.Contains(string(scriptBody), "--token") ||
+		!strings.Contains(string(scriptBody), "--nats") ||
+		!strings.Contains(string(scriptBody), "ReadWritePaths=${INSTALL_DIR}") {
+		t.Fatalf("unexpected static install script status=%d body=%s", scriptResp.StatusCode, scriptBody)
 	}
 
-	badScriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=bad;rm%20-rf")
+	credsReq, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/scripts/creds", nil)
+	credsReq.Header.Set("Authorization", "Bearer "+created.Token)
+	credsResp, err := http.DefaultClient.Do(credsReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credsBody, _ := io.ReadAll(credsResp.Body)
+	_ = credsResp.Body.Close()
+	if credsResp.StatusCode != http.StatusOK || !strings.Contains(string(credsBody), "BEGIN NATS USER JWT") {
+		t.Fatalf("unexpected /scripts/creds status=%d body=%s", credsResp.StatusCode, credsBody)
+	}
+
+	badScriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/creds?token=bad;rm%20-rf")
 	if err != nil {
 		t.Fatal(err)
 	}

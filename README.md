@@ -122,10 +122,13 @@ docker compose up -d
 2. 点击节点行的 **「部署脚本」**，复制一键安装命令并在边缘机上执行：
 
 ```bash
-curl -fsSL "https://11dog.dn11.example/scripts/install.sh?token=dog_xxx&nats=wss://nats.dn11.example" | sudo bash
+curl -fsSL "https://11dog.dn11.example/scripts/install.sh" | sudo bash -s -- \
+  --server "https://11dog.dn11.example" \
+  --token "dog_xxx" \
+  --nats "wss://nats.dn11.example"
 ```
 
-安装脚本会自动下载对应架构的 `11dog-agent` 至 `/opt/11dog/11dog-agent`（软链 `/usr/local/bin/11dog-agent`）、写入 `/etc/11dog/agent.creds` 与 `/etc/11dog/agent.yaml`，并注册为 `systemd` 服务（以非 root 用户 `11dog` 运行，授予 `CAP_NET_RAW` 支持原生 ICMP Ping / Traceroute，配置 `ReadWritePaths=/opt/11dog` 以支持平台下发自更新）。
+安装脚本会自动下载对应架构的 `11dog-agent` 至 `/opt/11dog/11dog-agent`（软链 `/usr/local/bin/11dog-agent`）、通过 `--token` 拉取凭据写入 `/etc/11dog/agent.creds` 并生成 `/etc/11dog/agent.yaml`，然后注册为 `systemd` 服务（以非 root 用户 `11dog` 运行，授予 `CAP_NET_RAW` 支持原生 ICMP Ping / Traceroute，配置 `ReadWritePaths=/opt/11dog` 以支持平台下发自更新）。
 
 常用运维命令：
 
@@ -134,7 +137,7 @@ curl -fsSL "https://11dog.dn11.example/scripts/install.sh?token=dog_xxx&nats=wss
 journalctl -u 11dog-agent -f
 
 # 卸载 Agent
-curl -fsSL "https://11dog.dn11.example/scripts/install.sh?uninstall=1" | sudo bash
+curl -fsSL "https://11dog.dn11.example/scripts/uninstall.sh" | sudo bash
 ```
 
 ---

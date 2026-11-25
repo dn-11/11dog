@@ -93,15 +93,22 @@ const installCmd = computed(() => {
   if (!deployNode.value?.token) return ''
   const origin = window.location.origin
   const addr = deployNATSAddr.value.trim() || defaultNATSAddr()
-  const params = new URLSearchParams({
-    token: deployNode.value.token,
-    nats: addr
-  })
-  return `curl -fsSL "${origin}/scripts/install.sh?${params.toString()}" | sudo bash`
+  const maxConc = deployNode.value.max_concurrency || 8
+  const args = [
+    `--server "${origin}"`,
+    `--token "${deployNode.value.token}"`,
+    `--nats "${addr}"`,
+    `--max-concurrency ${maxConc}`
+  ]
+  const dlBase = overview.value?.agent_download_base_url?.trim()
+  if (dlBase) {
+    args.push(`--download-base "${dlBase.replace(/\/+$/, '')}"`)
+  }
+  return `curl -fsSL "${origin}/scripts/install.sh" | sudo bash -s -- ${args.join(' ')}`
 })
 
 const uninstallCmd = computed(() => {
-  return `curl -fsSL "${window.location.origin}/scripts/install.sh?uninstall=1" | sudo bash`
+  return `curl -fsSL "${window.location.origin}/scripts/uninstall.sh" | sudo bash`
 })
 
 const minimalAgentYaml = computed(() => {
