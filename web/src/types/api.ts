@@ -98,7 +98,6 @@ export interface TargetPolicy {
 }
 
 export interface AdminCreateNodeRequest {
-  id?: string
   name: string
   region: string
   group: string

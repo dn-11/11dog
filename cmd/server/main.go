@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/dn11"
-	natsmq "github.com/11dog/11dog/internal/mq/nats"
-	"github.com/11dog/11dog/internal/natsauth"
-	"github.com/11dog/11dog/internal/server"
-	"github.com/11dog/11dog/internal/store"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/dn11"
+	natsmq "github.com/dn-11/11dog/internal/mq/nats"
+	"github.com/dn-11/11dog/internal/natsauth"
+	"github.com/dn-11/11dog/internal/server"
+	"github.com/dn-11/11dog/internal/store"
 )
 
 func main() {

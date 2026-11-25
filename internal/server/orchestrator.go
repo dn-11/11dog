@@ -13,11 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/dn11"
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq"
-	"github.com/11dog/11dog/internal/mq/nats"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/dn11"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/mq"
+	"github.com/dn-11/11dog/internal/mq/nats"
+	"github.com/google/uuid"
 )
 
 var (
@@ -246,7 +247,7 @@ func (o *Orchestrator) validateAndNormalize(req *model.CreateTaskRequest) (uint3
 
 func (o *Orchestrator) selectTargetNodes(req model.CreateTaskRequest) []model.NodeInfo {
 	allNodes := o.hub.ListNodes()
-	nodeIDSet := make(map[string]struct{}, len(req.NodeIDs))
+	nodeIDSet := make(map[uuid.UUID]struct{}, len(req.NodeIDs))
 	for _, id := range req.NodeIDs {
 		nodeIDSet[id] = struct{}{}
 	}
@@ -328,12 +329,12 @@ func (o *Orchestrator) CreateTask(ctx context.Context, req model.CreateTaskReque
 		CreatedUnixMs:  now.UnixMilli(),
 		DeadlineUnixMs: deadline.UnixMilli(),
 		TotalNodes:     len(nodes),
-		Results:        make(map[string]*model.NodeTaskResult, len(nodes)),
+		Results:        make(map[uuid.UUID]*model.NodeTaskResult, len(nodes)),
 	}
 
 	subtasks := make([]*mq.QueuedSubtask, 0, len(nodes))
 	for _, n := range nodes {
-		subtaskID := taskID + "_" + n.ID
+		subtaskID := taskID + "_" + n.ID.String()
 		snapshot.Results[n.ID] = &model.NodeTaskResult{
 			TaskID:    taskID,
 			SubtaskID: subtaskID,
@@ -595,7 +596,7 @@ func (o *Orchestrator) cloneSnapshot(rec *taskRecord) *model.TaskSnapshot {
 	defer rec.mu.Unlock()
 	src := rec.snapshot
 	cp := *src
-	cp.Results = make(map[string]*model.NodeTaskResult, len(src.Results))
+	cp.Results = make(map[uuid.UUID]*model.NodeTaskResult, len(src.Results))
 	for k, v := range src.Results {
 		vCopy := *v
 		cp.Results[k] = &vCopy

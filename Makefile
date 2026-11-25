@@ -1,5 +1,5 @@
 VERSION ?= 1.0.0
-LDFLAGS := -s -w -X github.com/11dog/11dog/internal/server.Version=$(VERSION) -X github.com/11dog/11dog/internal/agent.Version=$(VERSION)
+LDFLAGS := -s -w -X github.com/dn-11/11dog/internal/server.Version=$(VERSION) -X github.com/dn-11/11dog/internal/agent.Version=$(VERSION)
 
 .PHONY: web build-server build-agent build-agent-linux test helm-lint clean
 

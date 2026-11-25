@@ -32,7 +32,6 @@ const copiedTip = ref('')
 // Create Node Modal state
 const showCreateModal = ref(false)
 const createForm = ref({
-  id: '',
   name: '',
   region: '华东',
   group: 'DN11-BGP',
@@ -167,7 +166,6 @@ function handleLogout() {
 function openCreateModal() {
   actionErr.value = ''
   createForm.value = {
-    id: '',
     name: '',
     region: '华东',
     group: 'DN11-BGP',
@@ -183,7 +181,6 @@ async function submitCreateNode() {
   actionMsg.value = ''
   try {
     const created = await createAdminNode(adminToken.value, {
-      id: createForm.value.id.trim() || undefined,
       name: createForm.value.name.trim(),
       region: createForm.value.region.trim(),
       group: createForm.value.group.trim(),
@@ -764,10 +761,6 @@ onUnmounted(() => {
               <label class="field-item">
                 <span>节点名称 *</span>
                 <input v-model="createForm.name" type="text" required placeholder="例如：香港 BGP 01" />
-              </label>
-              <label class="field-item">
-                <span>自定义节点 ID（留空自动生成）</span>
-                <input v-model="createForm.id" type="text" class="mono" placeholder="例如：dn11-hk-01" />
               </label>
               <label class="field-item">
                 <span>区域标签 *</span>

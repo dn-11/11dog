@@ -1,6 +1,6 @@
 [Unit]
 Description=11Dog DN11 Network Probe Agent
-Documentation=https://github.com/11dog/11dog
+Documentation=https://github.com/dn-11/11dog
 After=network-online.target
 Wants=network-online.target
 

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/store"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/store"
 	natsgo "github.com/nats-io/nats.go"
 )
 

@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/11dog/11dog/internal/agent"
-	"github.com/11dog/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/agent"
+	"github.com/dn-11/11dog/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

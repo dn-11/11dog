@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
 )
 
 // PrefixEntry maps a DN11 IP prefix to its ASN, owner, and region metadata.

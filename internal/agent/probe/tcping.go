@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
 )
 
 func runTcping(ctx context.Context, target string, p model.TcpingParams) (string, *model.TcpingResult, model.TaskStatus, error) {

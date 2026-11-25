@@ -15,7 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/google/uuid"
 )
 
 // SetUpdateHooks overrides executable resolution and process restart for testing.
@@ -26,7 +27,7 @@ func (c *Client) SetUpdateHooks(execPathFn func() (string, error), restartFn fun
 
 func (c *Client) handleAgentUpdate(
 	parentCtx context.Context,
-	nodeID string,
+	nodeID uuid.UUID,
 	upd *model.AgentUpdateCommand,
 	upg *processUpgrader,
 	reportFn func(model.AgentUpdateState),

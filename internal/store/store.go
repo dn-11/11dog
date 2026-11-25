@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -16,18 +18,18 @@ var (
 
 // NodeRecord represents the authoritative server-side identity and NATS credentials of a probe node.
 type NodeRecord struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Region         string `json:"region"`
-	Group          string `json:"group"`
-	ASN            uint32 `json:"asn"`
-	MaxConcurrency uint32 `json:"max_concurrency"`
-	Token          string `json:"token"`
-	Creds          string `json:"creds"`
-	Enabled        bool   `json:"enabled"`
-	Notes          string `json:"notes"`
-	CreatedAtMs    int64  `json:"created_at_ms"`
-	UpdatedAtMs    int64  `json:"updated_at_ms"`
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	Region         string    `json:"region"`
+	Group          string    `json:"group"`
+	ASN            uint32    `json:"asn"`
+	MaxConcurrency uint32    `json:"max_concurrency"`
+	Token          string    `json:"token"`
+	Creds          string    `json:"creds"`
+	Enabled        bool      `json:"enabled"`
+	Notes          string    `json:"notes"`
+	CreatedAtMs    int64     `json:"created_at_ms"`
+	UpdatedAtMs    int64     `json:"updated_at_ms"`
 }
 
 // NodePatch holds mutable fields for updating an existing node record.
@@ -41,29 +43,27 @@ type NodePatch struct {
 	Notes          *string
 }
 
-// NodeStore persists authoritative node identities, per-node authentication tokens, and global settings.
+// NodeStore persists authoritative node identities, per-node NATS credentials, and global settings.
 type NodeStore interface {
 	CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord, error)
-	GetNode(ctx context.Context, id string) (*NodeRecord, error)
+	GetNode(ctx context.Context, id uuid.UUID) (*NodeRecord, error)
 	GetNodeByToken(ctx context.Context, token string) (*NodeRecord, error)
 	ListNodes(ctx context.Context) ([]*NodeRecord, error)
-	UpdateNode(ctx context.Context, id string, patch NodePatch) (*NodeRecord, error)
-	RotateToken(ctx context.Context, id string) (*NodeRecord, error)
-	UpdateCreds(ctx context.Context, id, creds string) (*NodeRecord, error)
-	DeleteNode(ctx context.Context, id string) error
+	UpdateNode(ctx context.Context, id uuid.UUID, patch NodePatch) (*NodeRecord, error)
+	RotateToken(ctx context.Context, id uuid.UUID) (*NodeRecord, error)
+	UpdateCreds(ctx context.Context, id uuid.UUID, creds string) (*NodeRecord, error)
+	DeleteNode(ctx context.Context, id uuid.UUID) error
 	GetSetting(ctx context.Context, key string) (string, int64, error)
 	SetSetting(ctx context.Context, key, value string) (int64, error)
 	Close() error
 }
 
-// GenerateNodeID generates a short, unique node identifier.
-func GenerateNodeID() string {
-	var b [4]byte
-	_, _ = rand.Read(b[:])
-	return "node-" + hex.EncodeToString(b[:])
+// GenerateNodeID generates a new random UUIDv4 node identifier.
+func GenerateNodeID() uuid.UUID {
+	return uuid.New()
 }
 
-// GenerateNodeToken generates a cryptographically random per-node communication token.
+// GenerateNodeToken generates a cryptographically random install-script token.
 func GenerateNodeToken() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])

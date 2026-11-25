@@ -14,10 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/store"
-	"github.com/11dog/11dog/web"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/store"
+	"github.com/dn-11/11dog/web"
+	"github.com/google/uuid"
 )
 
 // Version is set via ldflags at build time.
@@ -110,10 +111,7 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 			writeError(w, http.StatusBadRequest, "节点名称不能为空")
 			return
 		}
-		nodeID := strings.TrimSpace(req.ID)
-		if nodeID == "" {
-			nodeID = store.GenerateNodeID()
-		}
+		nodeID := store.GenerateNodeID()
 		creds, err := hub.AuthManager().IssueAgentCreds(nodeID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "签发 NATS .creds 失败: "+err.Error())
@@ -145,7 +143,11 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
-		nodeID := r.PathValue("id")
+		nodeID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无效的节点 UUID")
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req model.AdminUpdateNodeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -176,7 +178,11 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
-		nodeID := r.PathValue("id")
+		nodeID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无效的节点 UUID")
+			return
+		}
 		creds, err := hub.AuthManager().IssueAgentCreds(nodeID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "重新签发 NATS .creds 失败: "+err.Error())
@@ -198,7 +204,11 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
-		nodeID := r.PathValue("id")
+		nodeID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无效的节点 UUID")
+			return
+		}
 		if err := nodeStore.DeleteNode(r.Context(), nodeID); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusNotFound, "节点不存在")
@@ -214,7 +224,11 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
-		nodeID := r.PathValue("id")
+		nodeID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无效的节点 UUID")
+			return
+		}
 		if !hub.DisconnectNode(nodeID) {
 			writeError(w, http.StatusNotFound, "节点不存在或已离线")
 			return
@@ -252,7 +266,11 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
-		nodeID := r.PathValue("id")
+		nodeID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无效的节点 UUID")
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req model.AdminTriggerUpdateRequest
 		if r.Body != nil {

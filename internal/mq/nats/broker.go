@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq"
-	"github.com/11dog/11dog/internal/natsauth"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/mq"
+	"github.com/google/uuid"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -109,12 +109,12 @@ func (b *Broker) JetStream() jetstream.JetStream { return b.js }
 // StreamName returns the configured task stream name.
 func (b *Broker) StreamName() string { return b.streamName }
 
-func nodeSubject(nodeID string) string {
-	return "tasks.node." + natsauth.SanitizeSubjectToken(nodeID)
+func nodeSubject(nodeID uuid.UUID) string {
+	return "tasks.node." + nodeID.String()
 }
 
 func resultSubject(taskID string) string {
-	return "results.task." + natsauth.SanitizeSubjectToken(taskID)
+	return "results.task." + taskID
 }
 
 func isQueueFullError(err error) bool {
@@ -133,7 +133,7 @@ func isQueueFullError(err error) bool {
 }
 
 // EnqueueTask publishes a subtask to JetStream subject tasks.node.<nodeID>.
-func (b *Broker) EnqueueTask(ctx context.Context, nodeID string, task *mq.QueuedSubtask) error {
+func (b *Broker) EnqueueTask(ctx context.Context, nodeID uuid.UUID, task *mq.QueuedSubtask) error {
 	b.mu.RLock()
 	closed := b.closed
 	b.mu.RUnlock()
@@ -157,13 +157,12 @@ func (b *Broker) EnqueueTask(ctx context.Context, nodeID string, task *mq.Queued
 }
 
 // ConsumeNodeQueue pulls tasks from nodeID's durable JetStream consumer.
-func (b *Broker) ConsumeNodeQueue(ctx context.Context, nodeID string, maxInFlight int, handler func(context.Context, *mq.QueuedSubtask) error) error {
+func (b *Broker) ConsumeNodeQueue(ctx context.Context, nodeID uuid.UUID, maxInFlight int, handler func(context.Context, *mq.QueuedSubtask) error) error {
 	if maxInFlight <= 0 {
 		maxInFlight = 8
 	}
-	safeNode := natsauth.SanitizeSubjectToken(nodeID)
 	consumer, err := b.js.CreateOrUpdateConsumer(ctx, b.streamName, jetstream.ConsumerConfig{
-		Durable:       "node_" + safeNode,
+		Durable:       "node_" + nodeID.String(),
 		FilterSubject: nodeSubject(nodeID),
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       b.taskTTL + 15*time.Second,
@@ -268,11 +267,11 @@ func (b *Broker) SubscribeResult(_ context.Context, taskID string) (<-chan *mode
 }
 
 // QueueDepth queries JetStream consumer pending messages for nodeID.
-func (b *Broker) QueueDepth(nodeID string) int {
+func (b *Broker) QueueDepth(nodeID uuid.UUID) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	consumer, err := b.js.Consumer(ctx, b.streamName, "node_"+natsauth.SanitizeSubjectToken(nodeID))
+	consumer, err := b.js.Consumer(ctx, b.streamName, "node_"+nodeID.String())
 	if err != nil {
 		return 0
 	}

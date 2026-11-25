@@ -19,14 +19,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/11dog/11dog/internal/agent"
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/dn11"
-	"github.com/11dog/11dog/internal/model"
-	natsmq "github.com/11dog/11dog/internal/mq/nats"
-	"github.com/11dog/11dog/internal/natsauth"
-	"github.com/11dog/11dog/internal/server"
-	"github.com/11dog/11dog/internal/store"
+	"github.com/dn-11/11dog/internal/agent"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/dn11"
+	"github.com/dn-11/11dog/internal/model"
+	natsmq "github.com/dn-11/11dog/internal/mq/nats"
+	"github.com/dn-11/11dog/internal/natsauth"
+	"github.com/dn-11/11dog/internal/server"
+	"github.com/dn-11/11dog/internal/store"
+	"github.com/google/uuid"
 	"github.com/nats-io/jwt/v2"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nkeys"
@@ -219,10 +220,11 @@ func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
 func registerDBNodeAndStartAgent(
 	t *testing.T,
 	st *testStack,
-	id, name, region, group string,
+	name, region, group string,
 	asn, maxConc uint32,
 ) (*store.NodeRecord, *agent.Client) {
 	t.Helper()
+	id := uuid.New()
 	creds, err := st.authMgr.IssueAgentCreds(id)
 	if err != nil {
 		t.Fatal(err)
@@ -347,13 +349,13 @@ func waitForSSEDone(t *testing.T, baseURL, taskID string) model.TaskSnapshot {
 func TestE2ETcpingAndHTTPViaNativeNATSAndSSE(t *testing.T) {
 	stack := startTestStack(t, 20)
 
-	registerDBNodeAndStartAgent(t, stack, "node-hk-1", "香港节点 01", "香港", "DN11-BGP", 4211110101, 4)
-	registerDBNodeAndStartAgent(t, stack, "node-jp-1", "东京节点 01", "东京", "DN11-IX", 4211110202, 4)
+	recHK, _ := registerDBNodeAndStartAgent(t, stack, "香港节点 01", "香港", "DN11-BGP", 4211110101, 4)
+	recJP, _ := registerDBNodeAndStartAgent(t, stack, "东京节点 01", "东京", "DN11-IX", 4211110202, 4)
 	nodes := waitForOnlineNodes(t, stack.httpSrv.URL, 2)
 
 	for _, n := range nodes {
-		if n.ID == "bogus-local-id" {
-			t.Fatalf("agent used spoofed local node_id instead of JWT name: %+v", n)
+		if n.ID == uuid.Nil {
+			t.Fatalf("expected non-nil UUID node_id, got %+v", n)
 		}
 	}
 
@@ -390,7 +392,7 @@ func TestE2ETcpingAndHTTPViaNativeNATSAndSSE(t *testing.T) {
 	if doneTCP.CompletedNodes != 2 {
 		t.Fatalf("tcping CompletedNodes=%d, want 2", doneTCP.CompletedNodes)
 	}
-	for _, nodeID := range []string{"node-hk-1", "node-jp-1"} {
+	for _, nodeID := range []uuid.UUID{recHK.ID, recJP.ID} {
 		res := doneTCP.Results[nodeID]
 		if res == nil || res.Status != model.StatusCompleted || res.Tcping == nil {
 			t.Fatalf("unexpected tcping result for %s: %+v", nodeID, res)
@@ -415,7 +417,7 @@ func TestE2ETcpingAndHTTPViaNativeNATSAndSSE(t *testing.T) {
 	if doneHTTP.CompletedNodes != 2 {
 		t.Fatalf("http CompletedNodes=%d, want 2", doneHTTP.CompletedNodes)
 	}
-	for _, nodeID := range []string{"node-hk-1", "node-jp-1"} {
+	for _, nodeID := range []uuid.UUID{recHK.ID, recJP.ID} {
 		res := doneHTTP.Results[nodeID]
 		if res == nil || res.Status != model.StatusCompleted || res.HTTP == nil {
 			t.Fatalf("unexpected http result for %s: %+v", nodeID, res)
@@ -428,7 +430,7 @@ func TestE2ETcpingAndHTTPViaNativeNATSAndSSE(t *testing.T) {
 
 func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
 	stack := startTestStack(t, 20)
-	registerDBNodeAndStartAgent(t, stack, "node-pub-check", "检查节点", "华东", "DN11-IX", 4211110505, 8)
+	registerDBNodeAndStartAgent(t, stack, "检查节点", "华东", "DN11-IX", 4211110505, 8)
 	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
 
 	metaResp, err := http.Get(stack.httpSrv.URL + "/api/v1/meta")
@@ -482,8 +484,8 @@ func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
 func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 	stack := startTestStack(t, 20)
 
-	// 1. Create node via admin HTTP API (auto-mints .creds).
-	createReqBody := `{"id":"node-db-01","name":"数据库权威节点","region":"华南","group":"DN11-BGP","asn":4211110888,"max_concurrency":6}`
+	// 1. Create node via admin HTTP API (auto-generates UUID and mints .creds).
+	createReqBody := `{"name":"数据库权威节点","region":"华南","group":"DN11-BGP","asn":4211110888,"max_concurrency":6}`
 	req, _ := http.NewRequest(http.MethodPost, stack.httpSrv.URL+"/api/v1/admin/nodes", strings.NewReader(createReqBody))
 	req.Header.Set("X-Admin-Token", "test-admin-secret")
 	req.Header.Set("Content-Type", "application/json")
@@ -496,6 +498,9 @@ func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated || created.Token == "" || !strings.Contains(created.Creds, "BEGIN NATS USER JWT") {
 		t.Fatalf("POST /api/v1/admin/nodes status=%d created=%+v", resp.StatusCode, created)
+	}
+	if created.ID == uuid.Nil {
+		t.Fatalf("expected auto-generated UUID node_id, got %+v", created)
 	}
 
 	// 2. Verify hosted install script embeds .creds and NATS WebSocket URL.
@@ -524,7 +529,7 @@ func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 
 func TestAdminTargetPolicyEnforcement(t *testing.T) {
 	stack := startTestStack(t, 20)
-	registerDBNodeAndStartAgent(t, stack, "node-pol-1", "策略测试节点", "华东", "DN11-BGP", 4211110401, 4)
+	registerDBNodeAndStartAgent(t, stack, "策略测试节点", "华东", "DN11-BGP", 4211110401, 4)
 	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
 
 	policyPayload := `{"enabled":true,"allow_rules":["127.0.0.0/8","*.allowed.dn11"],"deny_rules":["blocked.allowed.dn11"]}`
@@ -589,7 +594,7 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, client := registerDBNodeAndStartAgent(t, stack, "node-upd-1", "自更新测试节点", "香港", "DN11-BGP", 4211110777, 4)
+	recUpd, client := registerDBNodeAndStartAgent(t, stack, "自更新测试节点", "香港", "DN11-BGP", 4211110777, 4)
 
 	var restarted atomic.Bool
 	client.SetUpdateHooks(
@@ -604,7 +609,7 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 
 	updReq, _ := http.NewRequest(
 		http.MethodPost,
-		stack.httpSrv.URL+"/api/v1/admin/nodes/node-upd-1/update",
+		stack.httpSrv.URL+"/api/v1/admin/nodes/"+recUpd.ID.String()+"/update",
 		strings.NewReader(`{"version":"2.0.0","force":true}`),
 	)
 	updReq.Header.Set("X-Admin-Token", "test-admin-secret")

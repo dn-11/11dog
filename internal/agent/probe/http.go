@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
 )
 
 func runHTTP(ctx context.Context, target string, p model.HTTPParams) (string, *model.HTTPResult, model.TaskStatus, error) {

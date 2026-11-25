@@ -15,11 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/11dog/11dog/internal/agent/probe"
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq"
-	"github.com/11dog/11dog/internal/natsauth"
+	"github.com/dn-11/11dog/internal/agent/probe"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/mq"
+	"github.com/dn-11/11dog/internal/natsauth"
+	"github.com/google/uuid"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -140,7 +141,7 @@ func (c *Client) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("extract node_id from creds: %w", err)
 	}
-	safeID := natsauth.SanitizeSubjectToken(nodeID)
+	idStr := nodeID.String()
 
 	tlsCfg, err := c.tlsConfig()
 	if err != nil {
@@ -148,7 +149,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 
 	opts := []natsgo.Option{
-		natsgo.Name("11dog-agent-" + safeID),
+		natsgo.Name("11dog-agent-" + idStr),
 		natsgo.UserCredentialBytes(credsBytes),
 		natsgo.MaxReconnects(-1),
 		natsgo.ReconnectWait(2 * time.Second),
@@ -187,7 +188,7 @@ func (c *Client) Run(ctx context.Context) error {
 	)
 
 	// Control subscriptions: cancel, update, reconnect.
-	cancelSub, err := nc.Subscribe("ctrl.node."+safeID+".cancel", func(msg *natsgo.Msg) {
+	cancelSub, err := nc.Subscribe("ctrl.node."+idStr+".cancel", func(msg *natsgo.Msg) {
 		var cmd model.CancelTaskCommand
 		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 			return
@@ -204,14 +205,14 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	defer func() { _ = cancelSub.Unsubscribe() }()
 
-	updateSub, err := nc.Subscribe("ctrl.node."+safeID+".update", func(msg *natsgo.Msg) {
+	updateSub, err := nc.Subscribe("ctrl.node."+idStr+".update", func(msg *natsgo.Msg) {
 		var cmd model.AgentUpdateCommand
 		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 			return
 		}
 		go c.handleAgentUpdate(runCtx, nodeID, &cmd, upg, func(st model.AgentUpdateState) {
 			if payload, err := json.Marshal(st); err == nil {
-				_ = nc.Publish("agent.update."+safeID, payload)
+				_ = nc.Publish("agent.update."+idStr, payload)
 				_ = nc.Flush()
 			}
 		})
@@ -221,7 +222,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	defer func() { _ = updateSub.Unsubscribe() }()
 
-	reconnectSub, err := nc.Subscribe("ctrl.node."+safeID+".reconnect", func(_ *natsgo.Msg) {
+	reconnectSub, err := nc.Subscribe("ctrl.node."+idStr+".reconnect", func(_ *natsgo.Msg) {
 		c.logger.Info("received reconnect command from control plane", "node_id", nodeID)
 		_ = nc.ForceReconnect()
 	})
@@ -247,7 +248,7 @@ func (c *Client) Run(ctx context.Context) error {
 			ConnectedAtMs:   connectedAtMs,
 		}
 		if payload, err := json.Marshal(hb); err == nil {
-			_ = nc.Publish("agent.hb."+safeID, payload)
+			_ = nc.Publish("agent.hb."+idStr, payload)
 		}
 	}
 	publishHB()
@@ -271,8 +272,8 @@ func (c *Client) Run(ctx context.Context) error {
 	}()
 
 	// JetStream Pull Consumer loop for this node's task subject.
-	consumerName := "node_" + safeID
-	filterSubj := "tasks.node." + safeID
+	consumerName := "node_" + idStr
+	filterSubj := "tasks.node." + idStr
 
 	for {
 		if runCtx.Err() != nil {
@@ -313,7 +314,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) consumeLoop(ctx context.Context, nc *natsgo.Conn, consumer jetstream.Consumer, nodeID string) error {
+func (c *Client) consumeLoop(ctx context.Context, nc *natsgo.Conn, consumer jetstream.Consumer, nodeID uuid.UUID) error {
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -341,14 +342,14 @@ func (c *Client) consumeLoop(ctx context.Context, nc *natsgo.Conn, consumer jets
 
 func publishTaskEvent(nc *natsgo.Conn, ev *model.TaskEvent) {
 	if payload, err := json.Marshal(ev); err == nil {
-		_ = nc.Publish("results.task."+natsauth.SanitizeSubjectToken(ev.TaskID), payload)
+		_ = nc.Publish("results.task."+ev.TaskID, payload)
 	}
 }
 
 func (c *Client) handleSubtask(
 	parentCtx context.Context,
 	nc *natsgo.Conn,
-	nodeID string,
+	nodeID uuid.UUID,
 	subtask *mq.QueuedSubtask,
 	msg jetstream.Msg,
 ) {

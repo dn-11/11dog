@@ -11,7 +11,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"

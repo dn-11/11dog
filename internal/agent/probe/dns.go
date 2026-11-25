@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
 	"github.com/miekg/dns"
 )
 

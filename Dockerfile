@@ -17,13 +17,13 @@ ARG VERSION=1.0.0
 ARG TARGETOS=linux
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
-    -ldflags="-s -w -X github.com/11dog/11dog/internal/server.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/dn-11/11dog/internal/server.Version=${VERSION}" \
     -o /out/11dog-server ./cmd/server
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-s -w -X github.com/11dog/11dog/internal/agent.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/dn-11/11dog/internal/agent.Version=${VERSION}" \
     -o /out/downloads/11dog-agent-linux-amd64 ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
-    -ldflags="-s -w -X github.com/11dog/11dog/internal/agent.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/dn-11/11dog/internal/agent.Version=${VERSION}" \
     -o /out/downloads/11dog-agent-linux-arm64 ./cmd/agent
 
 # Stage 3: Minimal runtime image

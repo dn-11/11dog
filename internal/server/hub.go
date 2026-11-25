@@ -11,11 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/11dog/11dog/internal/config"
-	"github.com/11dog/11dog/internal/model"
-	"github.com/11dog/11dog/internal/mq/nats"
-	"github.com/11dog/11dog/internal/natsauth"
-	"github.com/11dog/11dog/internal/store"
+	"github.com/dn-11/11dog/internal/config"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/mq/nats"
+	"github.com/dn-11/11dog/internal/natsauth"
+	"github.com/dn-11/11dog/internal/store"
+	"github.com/google/uuid"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -115,18 +116,22 @@ func (h *Hub) handleHeartbeatMsg(msg *natsgo.Msg) {
 	if hb.TimestampUnixMs == 0 {
 		hb.TimestampUnixMs = time.Now().UnixMilli()
 	}
-	safeID := strings.TrimPrefix(msg.Subject, "agent.hb.")
-	if safeID == "" {
-		safeID = natsauth.SanitizeSubjectToken(hb.NodeID)
+	nodeID, err := uuid.Parse(strings.TrimPrefix(msg.Subject, "agent.hb."))
+	if err != nil {
+		nodeID = hb.NodeID
 	}
+	if nodeID == uuid.Nil {
+		return
+	}
+	hb.NodeID = nodeID
 	data, err := json.Marshal(hb)
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := h.nodesKV.Put(ctx, safeID, data); err != nil {
-		h.logger.Warn("failed to store agent heartbeat in NATS KV", "node_id", safeID, "error", err)
+	if _, err := h.nodesKV.Put(ctx, nodeID.String(), data); err != nil {
+		h.logger.Warn("failed to store agent heartbeat in NATS KV", "node_id", nodeID, "error", err)
 	}
 }
 
@@ -138,8 +143,8 @@ func (h *Hub) handleUpdateStatusMsg(msg *natsgo.Msg) {
 	if st.UpdatedAtMs == 0 {
 		st.UpdatedAtMs = time.Now().UnixMilli()
 	}
-	safeID := strings.TrimPrefix(msg.Subject, "agent.update.")
-	if safeID == "" {
+	nodeID, err := uuid.Parse(strings.TrimPrefix(msg.Subject, "agent.update."))
+	if err != nil {
 		return
 	}
 	data, err := json.Marshal(st)
@@ -148,20 +153,20 @@ func (h *Hub) handleUpdateStatusMsg(msg *natsgo.Msg) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := h.updatesKV.Put(ctx, safeID, data); err != nil {
-		h.logger.Warn("failed to store agent update status in NATS KV", "node_id", safeID, "error", err)
+	if _, err := h.updatesKV.Put(ctx, nodeID.String(), data); err != nil {
+		h.logger.Warn("failed to store agent update status in NATS KV", "node_id", nodeID, "error", err)
 		return
 	}
 	h.logger.Info("agent update status reported",
-		"node_id", safeID,
+		"node_id", nodeID,
 		"target_version", st.TargetVersion,
 		"state", st.State,
 		"message", st.Message,
 	)
 }
 
-func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID string) (*model.AgentHeartbeat, bool) {
-	entry, err := h.nodesKV.Get(ctx, natsauth.SanitizeSubjectToken(nodeID))
+func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID uuid.UUID) (*model.AgentHeartbeat, bool) {
+	entry, err := h.nodesKV.Get(ctx, nodeID.String())
 	if err != nil {
 		return nil, false
 	}
@@ -172,8 +177,8 @@ func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID string) (*model.Agent
 	return &hb, true
 }
 
-func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID string) *model.AgentUpdateState {
-	entry, err := h.updatesKV.Get(ctx, natsauth.SanitizeSubjectToken(nodeID))
+func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID) *model.AgentUpdateState {
+	entry, err := h.updatesKV.Get(ctx, nodeID.String())
 	if err != nil {
 		return nil
 	}
@@ -185,7 +190,7 @@ func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID string) *model.Age
 }
 
 // CancelTask publishes a cancellation command to a specific node over Core NATS.
-func (h *Hub) CancelTask(nodeID, taskID, subtaskID, reason string) error {
+func (h *Hub) CancelTask(nodeID uuid.UUID, taskID, subtaskID, reason string) error {
 	payload, err := json.Marshal(model.CancelTaskCommand{
 		TaskID:    taskID,
 		SubtaskID: subtaskID,
@@ -194,12 +199,11 @@ func (h *Hub) CancelTask(nodeID, taskID, subtaskID, reason string) error {
 	if err != nil {
 		return err
 	}
-	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".cancel"
-	return h.broker.Conn().Publish(subj, payload)
+	return h.broker.Conn().Publish("ctrl.node."+nodeID.String()+".cancel", payload)
 }
 
 // DisconnectNode sends a reconnect command to an online node over Core NATS.
-func (h *Hub) DisconnectNode(nodeID string) bool {
+func (h *Hub) DisconnectNode(nodeID uuid.UUID) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, ok := h.getNodeHeartbeat(ctx, nodeID); !ok {
@@ -209,12 +213,11 @@ func (h *Hub) DisconnectNode(nodeID string) bool {
 		Reason:            "reconnect requested by admin",
 		ReconnectAfterSec: 2,
 	})
-	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".reconnect"
-	return h.broker.Conn().Publish(subj, payload) == nil
+	return h.broker.Conn().Publish("ctrl.node."+nodeID.String()+".reconnect", payload) == nil
 }
 
 // TriggerAgentUpdate pushes a self-update command to a single online node over Core NATS.
-func (h *Hub) TriggerAgentUpdate(nodeID string, req model.AdminTriggerUpdateRequest, fallbackDownloadBase string) model.AdminUpdateNodeResult {
+func (h *Hub) TriggerAgentUpdate(nodeID uuid.UUID, req model.AdminTriggerUpdateRequest, fallbackDownloadBase string) model.AdminUpdateNodeResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -272,7 +275,7 @@ func (h *Hub) TriggerAgentUpdate(nodeID string, req model.AdminTriggerUpdateRequ
 		UpdatedAtMs:   time.Now().UnixMilli(),
 	}
 	if pendingBytes, err := json.Marshal(pending); err == nil {
-		_, _ = h.updatesKV.Put(ctx, natsauth.SanitizeSubjectToken(nodeID), pendingBytes)
+		_, _ = h.updatesKV.Put(ctx, nodeID.String(), pendingBytes)
 	}
 
 	cmdPayload, err := json.Marshal(model.AgentUpdateCommand{
@@ -289,8 +292,7 @@ func (h *Hub) TriggerAgentUpdate(nodeID string, req model.AdminTriggerUpdateRequ
 		}
 	}
 
-	subj := "ctrl.node." + natsauth.SanitizeSubjectToken(nodeID) + ".update"
-	if err := h.broker.Conn().Publish(subj, cmdPayload); err != nil {
+	if err := h.broker.Conn().Publish("ctrl.node."+nodeID.String()+".update", cmdPayload); err != nil {
 		return model.AdminUpdateNodeResult{
 			NodeID:  nodeID,
 			Sent:    false,
@@ -311,7 +313,7 @@ func (h *Hub) TriggerAgentUpdate(nodeID string, req model.AdminTriggerUpdateRequ
 	}
 }
 
-// TriggerBatchAgentUpdate pushes a self-update command to selected node IDs or all online nodes.
+// TriggerBatchAgentUpdate pushes a self-update command to selected node UUIDs or all online nodes.
 func (h *Hub) TriggerBatchAgentUpdate(req model.AdminTriggerUpdateRequest, fallbackDownloadBase string) []model.AdminUpdateNodeResult {
 	targetIDs := req.NodeIDs
 	if len(targetIDs) == 0 {
@@ -320,13 +322,14 @@ func (h *Hub) TriggerBatchAgentUpdate(req model.AdminTriggerUpdateRequest, fallb
 				targetIDs = append(targetIDs, n.ID)
 			}
 		}
-		sort.Strings(targetIDs)
+		sort.Slice(targetIDs, func(i, j int) bool {
+			return targetIDs[i].String() < targetIDs[j].String()
+		})
 	}
 
 	results := make([]model.AdminUpdateNodeResult, 0, len(targetIDs))
 	for _, id := range targetIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
+		if id == uuid.Nil {
 			continue
 		}
 		results = append(results, h.TriggerAgentUpdate(id, req, fallbackDownloadBase))

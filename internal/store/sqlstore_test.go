@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestSQLiteNodeStoreCRUDAndTokenRotation(t *testing.T) {
@@ -14,8 +16,9 @@ func TestSQLiteNodeStoreCRUDAndTokenRotation(t *testing.T) {
 	defer st.Close()
 
 	ctx := context.Background()
+	nodeUUID := uuid.New()
 	created, err := st.CreateNode(ctx, &NodeRecord{
-		ID:             "node-hk-01",
+		ID:             nodeUUID,
 		Name:           "香港 BGP 01",
 		Region:         "香港",
 		Group:          "DN11-BGP",
@@ -36,12 +39,12 @@ func TestSQLiteNodeStoreCRUDAndTokenRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNodeByToken failed: %v", err)
 	}
-	if byToken.ID != "node-hk-01" || byToken.Name != "香港 BGP 01" {
+	if byToken.ID != nodeUUID || byToken.Name != "香港 BGP 01" {
 		t.Fatalf("unexpected GetNodeByToken record: %+v", byToken)
 	}
 
 	// Duplicate ID fails with ErrConflict
-	if _, err := st.CreateNode(ctx, &NodeRecord{ID: "node-hk-01", Name: "dup", Enabled: true}); !errors.Is(err, ErrConflict) {
+	if _, err := st.CreateNode(ctx, &NodeRecord{ID: nodeUUID, Name: "dup", Enabled: true}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate ID, got %v", err)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nkeys"
 )
 
@@ -29,12 +30,13 @@ func TestManagerIssueCreds(t *testing.T) {
 		t.Fatalf("unexpected account pub: %s", mgr.AccountPub())
 	}
 
-	creds, err := mgr.IssueAgentCreds("node-hk-01")
+	wantID := uuid.New()
+	creds, err := mgr.IssueAgentCreds(wantID)
 	if err != nil {
 		t.Fatalf("IssueAgentCreds failed: %v", err)
 	}
 	nodeID, err := ExtractNodeIDFromCreds([]byte(creds))
-	if err != nil || nodeID != "node-hk-01" {
-		t.Fatalf("ExtractNodeIDFromCreds = (%q, %v), want (node-hk-01, nil)", nodeID, err)
+	if err != nil || nodeID != wantID {
+		t.Fatalf("ExtractNodeIDFromCreds = (%v, %v), want (%v, nil)", nodeID, err, wantID)
 	}
 }

@@ -5,27 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 )
-
-// SanitizeSubjectToken normalizes a node or task ID into a safe single NATS subject token.
-func SanitizeSubjectToken(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			b.WriteRune(r)
-		default:
-			b.WriteByte('_')
-		}
-	}
-	if b.Len() == 0 {
-		return "unknown"
-	}
-	return b.String()
-}
 
 // Manager holds the NATS Account signing key (provisioned externally, e.g. via Helm)
 // and issues scoped User .creds JWTs for 11dog-server and edge probe agents.
@@ -96,14 +79,13 @@ func (m *Manager) IssueServerCreds() (userJWT string, userSeed string, creds str
 	return encoded, string(uSeedBytes), string(formatted), nil
 }
 
-// IssueAgentCreds mints a strictly subject-scoped NATS .creds bundle for a single probe node.
-func (m *Manager) IssueAgentCreds(nodeID string) (string, error) {
-	nodeID = strings.TrimSpace(nodeID)
-	if nodeID == "" {
+// IssueAgentCreds mints a strictly subject-scoped NATS .creds bundle for a single probe node UUID.
+func (m *Manager) IssueAgentCreds(nodeID uuid.UUID) (string, error) {
+	if nodeID == uuid.Nil {
 		return "", errors.New("nodeID is required")
 	}
-	safeID := SanitizeSubjectToken(nodeID)
-	consumerName := "node_" + safeID
+	idStr := nodeID.String()
+	consumerName := "node_" + idStr
 
 	uKP, err := nkeys.CreateUser()
 	if err != nil {
@@ -119,14 +101,14 @@ func (m *Manager) IssueAgentCreds(nodeID string) (string, error) {
 	}
 
 	uc := jwt.NewUserClaims(uPub)
-	uc.Name = nodeID
+	uc.Name = idStr
 	uc.IssuerAccount = m.accountPub
 	uc.Permissions = jwt.Permissions{
 		Pub: jwt.Permission{
 			Allow: jwt.StringList{
 				"results.task.*",
-				"agent.hb." + safeID,
-				"agent.update." + safeID,
+				"agent.hb." + idStr,
+				"agent.update." + idStr,
 				"$JS.ACK." + m.streamName + "." + consumerName + ".>",
 				"$JS.API.STREAM.INFO." + m.streamName,
 				"$JS.API.CONSUMER.INFO." + m.streamName + "." + consumerName,
@@ -137,8 +119,8 @@ func (m *Manager) IssueAgentCreds(nodeID string) (string, error) {
 		},
 		Sub: jwt.Permission{
 			Allow: jwt.StringList{
-				"tasks.node." + safeID,
-				"ctrl.node." + safeID + ".>",
+				"tasks.node." + idStr,
+				"ctrl.node." + idStr + ".>",
 				"_INBOX.>",
 			},
 		},
@@ -155,18 +137,19 @@ func (m *Manager) IssueAgentCreds(nodeID string) (string, error) {
 	return string(formatted), nil
 }
 
-// ExtractNodeIDFromCreds parses a NATS .creds bundle and returns the authoritative node ID (UserClaims.Name).
-func ExtractNodeIDFromCreds(creds []byte) (string, error) {
+// ExtractNodeIDFromCreds parses a NATS .creds bundle and returns the authoritative node UUID (UserClaims.Name).
+func ExtractNodeIDFromCreds(creds []byte) (uuid.UUID, error) {
 	userJWT, err := jwt.ParseDecoratedJWT(creds)
 	if err != nil {
-		return "", fmt.Errorf("parse creds jwt: %w", err)
+		return uuid.Nil, fmt.Errorf("parse creds jwt: %w", err)
 	}
 	claims, err := jwt.DecodeUserClaims(userJWT)
 	if err != nil {
-		return "", fmt.Errorf("decode user claims: %w", err)
+		return uuid.Nil, fmt.Errorf("decode user claims: %w", err)
 	}
-	if strings.TrimSpace(claims.Name) == "" {
-		return "", errors.New("creds jwt has empty user name")
+	nodeID, err := uuid.Parse(strings.TrimSpace(claims.Name))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("parse creds node uuid %q: %w", claims.Name, err)
 	}
-	return strings.TrimSpace(claims.Name), nil
+	return nodeID, nil
 }

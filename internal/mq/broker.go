@@ -5,7 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/google/uuid"
 )
 
 var (
@@ -19,7 +20,7 @@ var (
 type QueuedSubtask struct {
 	TaskID    string            `json:"task_id"`
 	SubtaskID string            `json:"subtask_id"`
-	NodeID    string            `json:"node_id"`
+	NodeID    uuid.UUID         `json:"node_id"`
 	Type      model.ProbeType   `json:"type"`
 	Target    string            `json:"target"`
 	TimeoutMs uint32            `json:"timeout_ms"`
@@ -31,11 +32,10 @@ type QueuedSubtask struct {
 // Broker abstracts the per-node task buffering queue and task result pub/sub bus.
 type Broker interface {
 	// EnqueueTask pushes a subtask into nodeID's bounded queue. Returns ErrQueueFull on overflow.
-	EnqueueTask(ctx context.Context, nodeID string, task *QueuedSubtask) error
+	EnqueueTask(ctx context.Context, nodeID uuid.UUID, task *QueuedSubtask) error
 
 	// ConsumeNodeQueue consumes tasks destined for nodeID until ctx is cancelled or the broker closes.
-	// If handler returns a non-nil error, the message is requeued / nacked for redelivery.
-	ConsumeNodeQueue(ctx context.Context, nodeID string, maxInFlight int, handler func(context.Context, *QueuedSubtask) error) error
+	ConsumeNodeQueue(ctx context.Context, nodeID uuid.UUID, maxInFlight int, handler func(context.Context, *QueuedSubtask) error) error
 
 	// PublishResult broadcasts a task event (progress/result/done) to all subscribers of taskID.
 	PublishResult(ctx context.Context, event *model.TaskEvent) error
@@ -44,7 +44,7 @@ type Broker interface {
 	SubscribeResult(ctx context.Context, taskID string) (<-chan *model.TaskEvent, func(), error)
 
 	// QueueDepth returns the approximate number of queued subtasks waiting for nodeID.
-	QueueDepth(nodeID string) int
+	QueueDepth(nodeID uuid.UUID) int
 
 	// Close releases all broker resources.
 	Close() error

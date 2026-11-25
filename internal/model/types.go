@@ -1,5 +1,7 @@
 package model
 
+import "github.com/google/uuid"
+
 // ProbeType enumerates supported network diagnostic probe types.
 type ProbeType string
 
@@ -63,7 +65,7 @@ type AgentUpdateState struct {
 
 // NodeInfo describes an edge probe node and its live internal telemetry (admin only).
 type NodeInfo struct {
-	ID             string            `json:"id"`
+	ID             uuid.UUID         `json:"id"`
 	Name           string            `json:"name"`
 	Region         string            `json:"region"`
 	Group          string            `json:"group"`
@@ -94,7 +96,7 @@ type NodeInfo struct {
 
 // PublicNodeInfo exposes only safe user-facing probe location attributes.
 type PublicNodeInfo struct {
-	ID           string      `json:"id"`
+	ID           uuid.UUID   `json:"id"`
 	Name         string      `json:"name"`
 	Region       string      `json:"region"`
 	Group        string      `json:"group"`
@@ -103,9 +105,8 @@ type PublicNodeInfo struct {
 	Status       string      `json:"status"`
 }
 
-// AdminCreateNodeRequest creates an authoritative node record and communication token in DB.
+// AdminCreateNodeRequest creates an authoritative node record and communication credentials in DB.
 type AdminCreateNodeRequest struct {
-	ID             string `json:"id,omitempty"`
 	Name           string `json:"name"`
 	Region         string `json:"region"`
 	Group          string `json:"group"`
@@ -127,18 +128,18 @@ type AdminUpdateNodeRequest struct {
 
 // AdminTriggerUpdateRequest dispatches a self-update command to one or more online agents.
 type AdminTriggerUpdateRequest struct {
-	NodeIDs     []string `json:"node_ids,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	DownloadURL string   `json:"download_url,omitempty"`
-	SHA256      string   `json:"sha256,omitempty"`
-	Force       bool     `json:"force,omitempty"`
+	NodeIDs     []uuid.UUID `json:"node_ids,omitempty"`
+	Version     string      `json:"version,omitempty"`
+	DownloadURL string      `json:"download_url,omitempty"`
+	SHA256      string      `json:"sha256,omitempty"`
+	Force       bool        `json:"force,omitempty"`
 }
 
 // AdminUpdateNodeResult reports the dispatch result for a single node update command.
 type AdminUpdateNodeResult struct {
-	NodeID  string `json:"node_id"`
-	Sent    bool   `json:"sent"`
-	Message string `json:"message,omitempty"`
+	NodeID  uuid.UUID `json:"node_id"`
+	Sent    bool      `json:"sent"`
+	Message string    `json:"message,omitempty"`
 }
 
 // TargetPolicy configures global probe target restrictions supporting domain wildcards and CIDRs.
@@ -174,7 +175,7 @@ type AdminOverview struct {
 
 // AgentHeartbeat is published periodically by edge agents over Core NATS (agent.hb.<nodeID>).
 type AgentHeartbeat struct {
-	NodeID          string            `json:"node_id"`
+	NodeID          uuid.UUID         `json:"node_id"`
 	IPv4            string            `json:"ipv4,omitempty"`
 	IPv6            string            `json:"ipv6,omitempty"`
 	Capabilities    []ProbeType       `json:"capabilities,omitempty"`
@@ -215,7 +216,7 @@ type ReconnectCommand struct {
 type CreateTaskRequest struct {
 	Type      ProbeType   `json:"type"`
 	Target    string      `json:"target"`
-	NodeIDs   []string    `json:"node_ids,omitempty"`
+	NodeIDs   []uuid.UUID `json:"node_ids,omitempty"`
 	Regions   []string    `json:"regions,omitempty"`
 	Groups    []string    `json:"groups,omitempty"`
 	TimeoutMs uint32      `json:"timeout_ms,omitempty"`
@@ -352,7 +353,7 @@ type DNSResult struct {
 type NodeTaskResult struct {
 	TaskID         string            `json:"task_id"`
 	SubtaskID      string            `json:"subtask_id"`
-	NodeID         string            `json:"node_id"`
+	NodeID         uuid.UUID         `json:"node_id"`
 	NodeName       string            `json:"node_name"`
 	Region         string            `json:"region"`
 	Group          string            `json:"group"`
@@ -373,17 +374,17 @@ type NodeTaskResult struct {
 
 // TaskSnapshot represents the complete state of a multi-node task.
 type TaskSnapshot struct {
-	TaskID          string                     `json:"task_id"`
-	Type            ProbeType                  `json:"type"`
-	Target          string                     `json:"target"`
-	Params          ProbeParams                `json:"params"`
-	CreatedUnixMs   int64                      `json:"created_unix_ms"`
-	DeadlineUnixMs  int64                      `json:"deadline_unix_ms"`
-	Cancelled       bool                       `json:"cancelled"`
-	TotalNodes      int                        `json:"total_nodes"`
-	CompletedNodes  int                        `json:"completed_nodes"`
-	OverloadedNodes int                        `json:"overloaded_nodes"`
-	Results         map[string]*NodeTaskResult `json:"results"`
+	TaskID          string                        `json:"task_id"`
+	Type            ProbeType                     `json:"type"`
+	Target          string                        `json:"target"`
+	Params          ProbeParams                   `json:"params"`
+	CreatedUnixMs   int64                         `json:"created_unix_ms"`
+	DeadlineUnixMs  int64                         `json:"deadline_unix_ms"`
+	Cancelled       bool                          `json:"cancelled"`
+	TotalNodes      int                           `json:"total_nodes"`
+	CompletedNodes  int                           `json:"completed_nodes"`
+	OverloadedNodes int                           `json:"overloaded_nodes"`
+	Results         map[uuid.UUID]*NodeTaskResult `json:"results"`
 }
 
 // ProgressPayload wraps incremental probe updates (ping packets or traceroute hops).
@@ -397,7 +398,7 @@ type TaskEvent struct {
 	EventType string           `json:"event_type"` // snapshot, progress, result, done
 	TaskID    string           `json:"task_id"`
 	SubtaskID string           `json:"subtask_id,omitempty"`
-	NodeID    string           `json:"node_id,omitempty"`
+	NodeID    uuid.UUID        `json:"node_id,omitempty"`
 	Type      ProbeType        `json:"type,omitempty"`
 	Status    TaskStatus       `json:"status,omitempty"`
 	Progress  *ProgressPayload `json:"progress,omitempty"`

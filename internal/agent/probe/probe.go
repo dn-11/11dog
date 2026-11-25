@@ -9,7 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/11dog/11dog/internal/model"
+	"github.com/dn-11/11dog/internal/model"
+	"github.com/google/uuid"
 )
 
 // ProgressFunc is invoked when an incremental probe update (ping packet or traceroute hop) is ready.
@@ -18,7 +19,8 @@ type ProgressFunc func(payload *model.ProgressPayload)
 // Run executes a diagnostic probe according to probeType and returns the final NodeTaskResult.
 func Run(
 	ctx context.Context,
-	taskID, subtaskID, nodeID string,
+	taskID, subtaskID string,
+	nodeID uuid.UUID,
 	probeType model.ProbeType,
 	target string,
 	timeoutMs uint32,

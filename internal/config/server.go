@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/11dog/11dog/internal/dn11"
+	"github.com/dn-11/11dog/internal/dn11"
 	"gopkg.in/yaml.v3"
 )
 

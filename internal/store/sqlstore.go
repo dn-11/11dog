@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
@@ -155,7 +156,7 @@ func isUniqueViolation(err error) bool {
 func (s *SQLStore) CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord, error) {
 	now := time.Now().UnixMilli()
 	cp := *rec
-	if strings.TrimSpace(cp.ID) == "" {
+	if cp.ID == uuid.Nil {
 		cp.ID = GenerateNodeID()
 	}
 	if strings.TrimSpace(cp.Token) == "" {
@@ -171,7 +172,7 @@ func (s *SQLStore) CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord
 		cp.Group = "Default"
 	}
 	if cp.Name == "" {
-		cp.Name = cp.ID
+		cp.Name = cp.ID.String()
 	}
 	cp.CreatedAtMs = now
 	cp.UpdatedAtMs = now
@@ -182,7 +183,7 @@ func (s *SQLStore) CreateNode(ctx context.Context, rec *NodeRecord) (*NodeRecord
 
 	_, err := s.db.ExecContext(
 		ctx, q,
-		cp.ID, cp.Name, cp.Region, cp.Group, int64(cp.ASN), int(cp.MaxConcurrency),
+		cp.ID.String(), cp.Name, cp.Region, cp.Group, int64(cp.ASN), int(cp.MaxConcurrency),
 		cp.Token, cp.Creds, cp.Enabled, cp.Notes, cp.CreatedAtMs, cp.UpdatedAtMs,
 	)
 	if err != nil {
@@ -215,10 +216,10 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (*NodeRecord, error)
 
 const selectNodeCols = `id, name, region, node_group, asn, max_concurrency, token, creds, enabled, notes, created_at_ms, updated_at_ms`
 
-// GetNode fetches a node record by ID.
-func (s *SQLStore) GetNode(ctx context.Context, id string) (*NodeRecord, error) {
+// GetNode fetches a node record by UUID.
+func (s *SQLStore) GetNode(ctx context.Context, id uuid.UUID) (*NodeRecord, error) {
 	q := s.rebind(`SELECT ` + selectNodeCols + ` FROM nodes WHERE id = ?`)
-	return scanNode(s.db.QueryRowContext(ctx, q, id))
+	return scanNode(s.db.QueryRowContext(ctx, q, id.String()))
 }
 
 // GetNodeByToken fetches a node record by its unique communication token.
@@ -254,7 +255,7 @@ func (s *SQLStore) ListNodes(ctx context.Context) ([]*NodeRecord, error) {
 }
 
 // UpdateNode applies mutable fields to an existing node record and returns the updated record.
-func (s *SQLStore) UpdateNode(ctx context.Context, id string, patch NodePatch) (*NodeRecord, error) {
+func (s *SQLStore) UpdateNode(ctx context.Context, id uuid.UUID, patch NodePatch) (*NodeRecord, error) {
 	cur, err := s.GetNode(ctx, id)
 	if err != nil {
 		return nil, err
@@ -294,7 +295,7 @@ func (s *SQLStore) UpdateNode(ctx context.Context, id string, patch NodePatch) (
 	res, err := s.db.ExecContext(
 		ctx, q,
 		cur.Name, cur.Region, cur.Group, int64(cur.ASN), int(cur.MaxConcurrency),
-		cur.Enabled, cur.Notes, cur.UpdatedAtMs, cur.ID,
+		cur.Enabled, cur.Notes, cur.UpdatedAtMs, cur.ID.String(),
 	)
 	if err != nil {
 		return nil, err
@@ -306,7 +307,7 @@ func (s *SQLStore) UpdateNode(ctx context.Context, id string, patch NodePatch) (
 }
 
 // RotateToken replaces a node's install-script token with a fresh random token.
-func (s *SQLStore) RotateToken(ctx context.Context, id string) (*NodeRecord, error) {
+func (s *SQLStore) RotateToken(ctx context.Context, id uuid.UUID) (*NodeRecord, error) {
 	cur, err := s.GetNode(ctx, id)
 	if err != nil {
 		return nil, err
@@ -315,7 +316,7 @@ func (s *SQLStore) RotateToken(ctx context.Context, id string) (*NodeRecord, err
 	cur.UpdatedAtMs = time.Now().UnixMilli()
 
 	q := s.rebind(`UPDATE nodes SET token = ?, updated_at_ms = ? WHERE id = ?`)
-	res, err := s.db.ExecContext(ctx, q, cur.Token, cur.UpdatedAtMs, id)
+	res, err := s.db.ExecContext(ctx, q, cur.Token, cur.UpdatedAtMs, id.String())
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +327,7 @@ func (s *SQLStore) RotateToken(ctx context.Context, id string) (*NodeRecord, err
 }
 
 // UpdateCreds stores a newly signed NATS .creds bundle and rotates the install token.
-func (s *SQLStore) UpdateCreds(ctx context.Context, id, creds string) (*NodeRecord, error) {
+func (s *SQLStore) UpdateCreds(ctx context.Context, id uuid.UUID, creds string) (*NodeRecord, error) {
 	cur, err := s.GetNode(ctx, id)
 	if err != nil {
 		return nil, err
@@ -336,7 +337,7 @@ func (s *SQLStore) UpdateCreds(ctx context.Context, id, creds string) (*NodeReco
 	cur.UpdatedAtMs = time.Now().UnixMilli()
 
 	q := s.rebind(`UPDATE nodes SET creds = ?, token = ?, updated_at_ms = ? WHERE id = ?`)
-	res, err := s.db.ExecContext(ctx, q, cur.Creds, cur.Token, cur.UpdatedAtMs, id)
+	res, err := s.db.ExecContext(ctx, q, cur.Creds, cur.Token, cur.UpdatedAtMs, id.String())
 	if err != nil {
 		return nil, err
 	}
@@ -346,10 +347,10 @@ func (s *SQLStore) UpdateCreds(ctx context.Context, id, creds string) (*NodeReco
 	return cur, nil
 }
 
-// DeleteNode deletes a node record by ID.
-func (s *SQLStore) DeleteNode(ctx context.Context, id string) error {
+// DeleteNode deletes a node record by UUID.
+func (s *SQLStore) DeleteNode(ctx context.Context, id uuid.UUID) error {
 	q := s.rebind(`DELETE FROM nodes WHERE id = ?`)
-	res, err := s.db.ExecContext(ctx, q, id)
+	res, err := s.db.ExecContext(ctx, q, id.String())
 	if err != nil {
 		return err
 	}
