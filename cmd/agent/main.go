@@ -30,7 +30,7 @@ func main() {
 
 	var (
 		configPath     = flag.String("config", "", "path to agent YAML configuration")
-		natsAddr       = flag.String("nats", "", "override NATS server URL (e.g. nats://host:4222 or wss://host/nats)")
+		natsAddr       = flag.String("nats", "", "override NATS WebSocket URL (e.g. wss://nats.example.com)")
 		credsFile      = flag.String("creds", "", "override path to NATS .creds JWT/NKey file")
 		streamName     = flag.String("stream", "", "override NATS JetStream task stream name")
 		maxConcurrency = flag.Uint("max-concurrency", 0, "override max concurrent probe tasks")

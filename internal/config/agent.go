@@ -30,7 +30,7 @@ type AgentConfig struct {
 // DefaultAgentConfig returns sensible defaults for an edge probe agent.
 func DefaultAgentConfig() *AgentConfig {
 	return &AgentConfig{
-		NATSAddr:             "nats://127.0.0.1:4222",
+		NATSAddr:             "ws://127.0.0.1:8443",
 		CredsFile:            "/etc/11dog/agent.creds",
 		StreamName:           "DOG_TASKS",
 		MaxConcurrency:       8,
@@ -60,7 +60,7 @@ func LoadAgentConfig(path string) (*AgentConfig, error) {
 	}
 	applyAgentEnvOverrides(cfg)
 	if cfg.NATSAddr == "" {
-		cfg.NATSAddr = "nats://127.0.0.1:4222"
+		cfg.NATSAddr = "ws://127.0.0.1:8443"
 	}
 	if cfg.StreamName == "" {
 		cfg.StreamName = "DOG_TASKS"

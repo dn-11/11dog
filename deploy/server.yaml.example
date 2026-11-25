@@ -15,9 +15,9 @@ db:
   dsn: "./data/11dog.db"
 
 nats:
-  # 外部 NATS JetStream 地址（支持 nats://, tls://, ws://, wss://）
+  # 内部 NATS JetStream 地址（供控制面连接）
   url: "nats://127.0.0.1:4222"
-  # 对外展示给 Agent 安装脚本的 NATS 地址（留空则复用 url）
+  # 对外提供给 Agent 连接的 NATS WebSocket 地址（仅支持 ws:// 或 wss://，例如 wss://nats.dn11.example）
   public_url: ""
   stream_name: "DOG_TASKS"
   max_queue_per_node: 20

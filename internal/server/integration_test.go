@@ -33,17 +33,18 @@ import (
 )
 
 type testStack struct {
-	cfg     *config.ServerConfig
-	store   *store.SQLStore
-	authMgr *natsauth.Manager
-	natsSrv *natsserver.Server
-	broker  *natsmq.Broker
-	hub     *server.Hub
-	orch    *server.Orchestrator
-	httpSrv *httptest.Server
+	cfg       *config.ServerConfig
+	store     *store.SQLStore
+	authMgr   *natsauth.Manager
+	natsSrv   *natsserver.Server
+	natsWSURL string
+	broker    *natsmq.Broker
+	hub       *server.Hub
+	orch      *server.Orchestrator
+	httpSrv   *httptest.Server
 }
 
-func startTestNATSServer(t *testing.T) (*natsserver.Server, string) {
+func startTestNATSServer(t *testing.T) (*natsserver.Server, string, string) {
 	t.Helper()
 	opKP, err := nkeys.CreateOperator()
 	if err != nil {
@@ -93,9 +94,18 @@ func startTestNATSServer(t *testing.T) (*natsserver.Server, string) {
 		t.Fatal(err)
 	}
 
+	// Pick a free local port for NATS WebSocket listener.
+	wsLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsPort := wsLis.Addr().(*net.TCPAddr).Port
+	_ = wsLis.Close()
+
 	storeDir := t.TempDir()
 	confPath := filepath.Join(t.TempDir(), "nats-server.conf")
 	confContent := "host: 127.0.0.1\nport: -1\njetstream {\n  store_dir: " + strconv.Quote(storeDir) + "\n}\n" +
+		"websocket {\n  host: 127.0.0.1\n  port: " + strconv.Itoa(wsPort) + "\n  no_tls: true\n}\n" +
 		"operator: " + opJWT + "\n" +
 		"system_account: " + sysPub + "\n" +
 		"resolver: MEMORY\nresolver_preload: {\n  " + sysPub + ": " + sysJWT + "\n  " + accPub + ": " + accJWT + "\n}\n"
@@ -121,7 +131,7 @@ func startTestNATSServer(t *testing.T) (*natsserver.Server, string) {
 	t.Cleanup(func() {
 		ns.Shutdown()
 	})
-	return ns, string(accSeed)
+	return ns, "ws://127.0.0.1:" + strconv.Itoa(wsPort), string(accSeed)
 }
 
 func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
@@ -133,8 +143,9 @@ func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
 	cfg.Limits.RateLimitRPM = 600
 	cfg.Limits.RateLimitBurst = 100
 
-	ns, accSeed := startTestNATSServer(t)
+	ns, natsWSURL, accSeed := startTestNATSServer(t)
 	cfg.NATS.URL = ns.ClientURL()
+	cfg.NATS.PublicURL = natsWSURL
 	cfg.NATS.AccountSeed = accSeed
 
 	authMgr, err := natsauth.NewManager(accSeed, cfg.NATS.StreamName)
@@ -193,14 +204,15 @@ func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
 	})
 
 	return &testStack{
-		cfg:     cfg,
-		store:   nodeStore,
-		authMgr: authMgr,
-		natsSrv: ns,
-		broker:  broker,
-		hub:     hub,
-		orch:    orch,
-		httpSrv: httpSrv,
+		cfg:       cfg,
+		store:     nodeStore,
+		authMgr:   authMgr,
+		natsSrv:   ns,
+		natsWSURL: natsWSURL,
+		broker:    broker,
+		hub:       hub,
+		orch:      orch,
+		httpSrv:   httpSrv,
 	}
 }
 
@@ -230,7 +242,7 @@ func registerDBNodeAndStartAgent(
 	}
 
 	cfg := config.DefaultAgentConfig()
-	cfg.NATSAddr = st.cfg.NATS.URL
+	cfg.NATSAddr = st.natsWSURL
 	cfg.Creds = creds
 	cfg.CredsFile = ""
 	cfg.StreamName = st.cfg.NATS.StreamName
@@ -489,8 +501,8 @@ func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 		t.Fatalf("POST /api/v1/admin/nodes status=%d created=%+v", resp.StatusCode, created)
 	}
 
-	// 2. Verify hosted install script embeds .creds and NATS URL.
-	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&nats=tls://nats.dn11.example:4222")
+	// 2. Verify hosted install script embeds .creds and NATS WebSocket URL.
+	scriptResp, err := http.Get(stack.httpSrv.URL + "/scripts/install.sh?token=" + created.Token + "&nats=wss://nats.dn11.example")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +510,7 @@ func TestAuthoritativeNodeCredsAndInstallScript(t *testing.T) {
 	_ = scriptResp.Body.Close()
 	if scriptResp.StatusCode != http.StatusOK ||
 		!strings.Contains(string(scriptBody), "BEGIN NATS USER JWT") ||
-		!strings.Contains(string(scriptBody), "tls://nats.dn11.example:4222") ||
+		!strings.Contains(string(scriptBody), "wss://nats.dn11.example") ||
 		!strings.Contains(string(scriptBody), "ReadWritePaths=/opt/11dog") {
 		t.Fatalf("unexpected hosted install script status=%d body=%s", scriptResp.StatusCode, scriptBody)
 	}

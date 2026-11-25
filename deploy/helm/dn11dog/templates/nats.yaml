@@ -14,13 +14,11 @@ data:
     jetstream {
       store_dir: "/data/jetstream"
     }
-    {{- if .Values.nats.websocket.enabled }}
 
     websocket {
       port: {{ .Values.nats.websocket.port }}
       no_tls: true
     }
-    {{- end }}
 
     include auth/nats-auth.conf
 ---
@@ -40,11 +38,9 @@ spec:
     - name: monitor
       port: 8222
       targetPort: 8222
-    {{- if .Values.nats.websocket.enabled }}
     - name: websocket
       port: {{ .Values.nats.websocket.port }}
       targetPort: {{ .Values.nats.websocket.port }}
-    {{- end }}
   selector:
     {{- include "dn11dog.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: nats
@@ -81,10 +77,8 @@ spec:
               containerPort: 4222
             - name: monitor
               containerPort: 8222
-            {{- if .Values.nats.websocket.enabled }}
             - name: websocket
               containerPort: {{ .Values.nats.websocket.port }}
-            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz

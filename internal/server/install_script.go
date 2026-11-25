@@ -19,7 +19,7 @@ import (
 
 var (
 	tokenParamRe     = regexp.MustCompile(`^[a-zA-Z0-9_-]{8,128}$`)
-	natsParamRe      = regexp.MustCompile(`^(?:nats|tls|ws|wss)://[a-zA-Z0-9._:\[\]-]+(?:/[a-zA-Z0-9._~/-]*)?$`)
+	natsParamRe      = regexp.MustCompile(`^wss?://[a-zA-Z0-9._:\[\]-]+(?:/[a-zA-Z0-9._~/-]*)?$`)
 	binaryFilenameRe = regexp.MustCompile(`^11dog-agent-[a-z0-9-]+(\.exe)?$`)
 )
 
@@ -138,10 +138,14 @@ func ServeInstallScript(cfg *config.ServerConfig, nodeStore store.NodeStore) htt
 			natsAddr = strings.TrimSpace(cfg.NATS.PublicURL)
 		}
 		if natsAddr == "" {
-			natsAddr = strings.TrimSpace(cfg.NATS.URL)
+			wsScheme := "ws"
+			if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+				wsScheme = "wss"
+			}
+			natsAddr = fmt.Sprintf("%s://%s", wsScheme, r.Host)
 		}
 		if !natsParamRe.MatchString(natsAddr) {
-			http.Error(w, "invalid nats parameter (expected nats://, tls://, ws://, or wss://)", http.StatusBadRequest)
+			http.Error(w, "invalid nats parameter (expected ws:// or wss://)", http.StatusBadRequest)
 			return
 		}
 

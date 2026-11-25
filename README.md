@@ -2,7 +2,7 @@
 
 **11Dog** 是面向 **DN11** 网络的分布式测速与拨测平台（ITDog 风格），支持多节点并发执行 ICMP Ping、TCPing、HTTP(S)、Traceroute 与 DNS 探测，并通过 SSE 实时流式展示结果。
 
-- **原生 NATS JetStream + 去中心化 JWT/NKey 鉴权**：边缘节点持服务端签发的专属 `.creds` 直连 NATS（支持 `nats://`、`tls://`、`wss://`），Broker 原生强制隔离每个节点的 Subject 权限；控制面完全无状态，天然支持多副本水平扩展。
+- **原生 NATS JetStream + 去中心化 JWT/NKey 鉴权**：边缘节点持服务端签发的专属 `.creds` 通过 WebSocket（`ws://` / `wss://`）直连 NATS，Broker 原生强制隔离每个节点的 Subject 权限；控制面完全无状态，天然支持多副本水平扩展。
 - **平台下发 Agent 自更新**：支持在管理后台单节点或批量下发更新指令，Agent 自动下载托管二进制、校验 SHA-256、等待探测排空后原子替换并自重启。
 - **全局测试目标限制**：支持在后台配置全局允许/禁止规则（域名通配符与 IPv4/IPv6 CIDR），持久化保存在数据库、缓存在内存，并通过 NATS 实时同步至所有控制面副本。
 
@@ -26,7 +26,7 @@ helm upgrade --install dn11dog oci://ghcr.io/dn-11/charts/dn11dog \
 ```
 
 - **控制面 Service**：`dn11dog:8080` 提供 Web 前台、`/admin` 管理后台、SSE 实时流及托管安装脚本/二进制下载；配置 Ingress 时请关闭响应缓冲以保证 SSE 实时推送（例如 Nginx Ingress 添加 `nginx.ingress.kubernetes.io/proxy-buffering: "off"`）。
-- **NATS Service**：`dn11dog-nats` 暴露 `4222`（NATS TCP）与 `8443`（NATS WebSocket），可将 `8443` 通过普通 HTTPS Ingress 暴露为 `wss://` 供外部边缘 Agent 接入，或直接暴露 `4222` + TLS。
+- **NATS Service**：`dn11dog-nats` 暴露 `8443`（NATS WebSocket），通过普通 HTTPS Ingress / 反向代理暴露为 `wss://` 供外部边缘 Agent 接入（集群内部控制面使用 `4222` 通信）。
 - **自定义 NATS 密钥 / 外部 NATS 集群**：可通过 `nats.auth.existingSecret` 复用已有 Secret（需包含 `account-seed`，内置 NATS 时还需 `nats-auth.conf`），或设置 `nats.enabled=false` + `nats.url` 连接外部 NATS 集群。
 - **多副本高可用**：将 `db.driver` 切换为 `postgres` 并调大 `replicaCount` 即可。
 
@@ -59,6 +59,10 @@ http_port: 8222
 jetstream {
   store_dir: "/data/jetstream"
 }
+websocket {
+  port: 8443
+  no_tls: true
+}
 include nats-auth.conf
 ```
 
@@ -71,7 +75,7 @@ services:
     restart: unless-stopped
     command: ["-c", "/etc/nats/nats-server.conf"]
     ports:
-      - "4222:4222"
+      - "8443:8443"
     volumes:
       - ./nats-init:/etc/nats:ro
       - nats-data:/data/jetstream
@@ -88,7 +92,7 @@ services:
       DOG_ADMIN_TOKEN: "change-me-strong-admin-token"
       DOG_DB_DSN: "/var/lib/11dog/11dog.db"
       DOG_NATS_URL: "nats://nats:4222"
-      DOG_PUBLIC_NATS_URL: "nats://your-public-host:4222"
+      DOG_PUBLIC_NATS_URL: "wss://nats.dn11.example"
       DOG_NATS_ACCOUNT_SEED: "SA..." # 填入上一步生成的 account.seed 内容
     volumes:
       - 11dog-data:/var/lib/11dog

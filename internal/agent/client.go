@@ -98,7 +98,7 @@ func (c *Client) tlsConfig() (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
-// Run connects directly to NATS using JWT/NKey .creds, starts heartbeats, control listeners,
+// Run connects to NATS over WebSocket using JWT/NKey .creds, starts heartbeats, control listeners,
 // and the JetStream pull consumer until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) error {
 	credsBytes, err := c.loadCredsBytes()

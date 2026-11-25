@@ -38,7 +38,7 @@ nats:
   enabled: true
   # Internal NATS URL used by 11dog-server. Defaults to nats://<fullname>-nats:4222 when nats.enabled=true.
   url: ""
-  # External NATS URL written into agent install scripts (e.g. nats://nats.example.com:4222 or wss://nats.example.com).
+  # External NATS WebSocket URL written into agent install scripts (ws:// or wss://, e.g. wss://nats.example.com).
   publicUrl: ""
   streamName: "DOG_TASKS"
   maxQueuePerNode: 20
@@ -50,8 +50,7 @@ nats:
     tag: "2.10-alpine"
     pullPolicy: IfNotPresent
   websocket:
-    # Expose NATS WebSocket listener (8443) so edge agents can connect over wss:// behind Ingress/Nginx.
-    enabled: true
+    # NATS WebSocket listener port for edge agents (expose as wss:// behind Ingress/Nginx).
     port: 8443
   storageSize: 1Gi
   storageClassName: ""

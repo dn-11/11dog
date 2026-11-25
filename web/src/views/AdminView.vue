@@ -83,7 +83,11 @@ const policySaving = ref(false)
 let refreshTimer: number | undefined
 
 function defaultNATSAddr(): string {
-  return overview.value?.public_nats_url || overview.value?.nats_url || `nats://${window.location.hostname}:4222`
+  if (overview.value?.public_nats_url) {
+    return overview.value.public_nats_url
+  }
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${wsProto}//${window.location.host}`
 }
 
 const installCmd = computed(() => {
@@ -131,7 +135,7 @@ async function loadData(token: string): Promise<boolean> {
     adminToken.value = token
     sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
     if (!deployNATSAddr.value) {
-      deployNATSAddr.value = ov.public_nats_url || ov.nats_url || defaultNATSAddr()
+      deployNATSAddr.value = ov.public_nats_url || defaultNATSAddr()
     }
     return true
   } catch (err) {
@@ -859,7 +863,7 @@ onUnmounted(() => {
 
             <div class="form-grid" style="margin-bottom: 12px">
               <label class="field-item full-span">
-                <span>NATS 连接地址（nats://、tls:// 或 wss://）</span>
+                <span>NATS WebSocket 地址（ws:// 或 wss://）</span>
                 <input v-model="deployNATSAddr" type="text" class="mono" />
               </label>
             </div>

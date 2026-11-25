@@ -8,10 +8,7 @@
 2. Service:
   - 控制面 HTTP/SSE: {{ include "dn11dog.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}
 {{- if .Values.nats.enabled }}
-  - NATS Client TCP: {{ include "dn11dog.fullname" . }}-nats.{{ .Release.Namespace }}.svc:4222
-{{- if .Values.nats.websocket.enabled }}
-  - NATS WebSocket:  {{ include "dn11dog.fullname" . }}-nats.{{ .Release.Namespace }}.svc:{{ .Values.nats.websocket.port }} (可经 Ingress/Nginx 暴露为 wss:// 供外部 Agent 接入)
-{{- end }}
+  - NATS WebSocket:  {{ include "dn11dog.fullname" . }}-nats.{{ .Release.Namespace }}.svc:{{ .Values.nats.websocket.port }} (经 Ingress/Nginx 暴露为 wss:// 供边缘 Agent 接入)
 {{- end }}
 
 3. NATS JWT/NKey 认证 Secret:
@@ -20,7 +17,7 @@
 4. 节点接入:
   登录 /admin -> 「+ 新增节点」-> 节点行「部署脚本」复制一键安装命令（自动写入节点专属 .creds）。
 {{- if .Values.nats.publicUrl }}
-  Agent NATS 地址: {{ .Values.nats.publicUrl }}
+  Agent NATS WebSocket 地址: {{ .Values.nats.publicUrl }}
 {{- else }}
-  建议设置 nats.publicUrl（例如 nats://nats.example.com:4222 或 wss://nats.example.com）以便一键安装脚本自动填入公网地址。
+  建议设置 nats.publicUrl（例如 wss://nats.example.com）以便一键安装脚本自动填入 Agent WebSocket 地址。
 {{- end }}
