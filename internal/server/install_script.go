@@ -249,6 +249,7 @@ cat > "${CONFIG_FILE}" <<EOF
 nats_addr: "${NATS_ADDR}"
 creds_file: "${CREDS_FILE}"
 stream_name: "${STREAM_NAME}"
+pid_file: "/opt/11dog/11dog-agent.pid"
 max_concurrency: ${MAX_CONCURRENCY}
 heartbeat_interval_sec: 10
 EOF
@@ -267,7 +268,10 @@ Wants=network-online.target
 Type=simple
 User=11dog
 Group=11dog
+PIDFile=/opt/11dog/11dog-agent.pid
 ExecStart=/opt/11dog/11dog-agent --config /etc/11dog/agent.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=0

@@ -28,6 +28,7 @@ func (c *Client) handleAgentUpdate(
 	parentCtx context.Context,
 	nodeID string,
 	upd *model.AgentUpdateCommand,
+	upg *processUpgrader,
 	reportFn func(model.AgentUpdateState),
 ) {
 	if upd == nil {
@@ -116,18 +117,18 @@ func (c *Client) handleAgentUpdate(
 	}
 	cleanupTmp = false
 
-	report("restarting", "更新已应用，正在重启 Agent...")
-	c.logger.Info("agent binary replaced successfully; restarting process", "exe_path", exePath, "target_version", targetVer)
+	report("restarting", "更新已应用，正在通过 tableflip 平滑切换进程...")
+	c.logger.Info("agent binary replaced successfully; triggering tableflip upgrade", "exe_path", exePath, "target_version", targetVer)
 
-	time.Sleep(200 * time.Millisecond)
-
-	restartFn := restartSelf
+	var upgradeErr error
 	if c.updateRestartFn != nil {
-		restartFn = c.updateRestartFn
+		upgradeErr = c.updateRestartFn(exePath)
+	} else {
+		upgradeErr = upg.Upgrade()
 	}
-	if err := restartFn(exePath); err != nil {
-		c.logger.Error("agent restart failed after update", "error", err)
-		report("failed", "重启失败: "+err.Error())
+	if upgradeErr != nil {
+		c.logger.Error("tableflip upgrade failed", "error", upgradeErr)
+		report("failed", "平滑重启失败: "+upgradeErr.Error())
 		return
 	}
 }

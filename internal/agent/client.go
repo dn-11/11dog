@@ -99,8 +99,25 @@ func (c *Client) tlsConfig() (*tls.Config, error) {
 }
 
 // Run connects to NATS over WebSocket using JWT/NKey .creds, starts heartbeats, control listeners,
-// and the JetStream pull consumer until ctx is cancelled.
+// and the JetStream pull consumer until ctx is cancelled or tableflip completes a graceful upgrade.
 func (c *Client) Run(ctx context.Context) error {
+	upg, err := newProcessUpgrader(c.cfg.PIDFile)
+	if err != nil {
+		return fmt.Errorf("init tableflip upgrader: %w", err)
+	}
+	defer upg.Stop()
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		select {
+		case <-upg.Exit():
+			c.logger.Info("tableflip upgrade ready; draining old agent process")
+			runCancel()
+		case <-runCtx.Done():
+		}
+	}()
+
 	credsBytes, err := c.loadCredsBytes()
 	if err != nil {
 		return err
@@ -182,7 +199,7 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 			return
 		}
-		go c.handleAgentUpdate(ctx, nodeID, &cmd, func(st model.AgentUpdateState) {
+		go c.handleAgentUpdate(runCtx, nodeID, &cmd, upg, func(st model.AgentUpdateState) {
 			if payload, err := json.Marshal(st); err == nil {
 				_ = nc.Publish("agent.update."+safeID, payload)
 				_ = nc.Flush()
@@ -232,12 +249,17 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	publishHB()
 
+	// Signal tableflip that this (potentially newly upgraded) process is connected and ready.
+	if err := upg.Ready(); err != nil {
+		return fmt.Errorf("tableflip ready: %w", err)
+	}
+
 	go func() {
 		ticker := time.NewTicker(hbInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			case <-ticker.C:
 				publishHB()
@@ -250,11 +272,11 @@ func (c *Client) Run(ctx context.Context) error {
 	filterSubj := "tasks.node." + safeID
 
 	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if runCtx.Err() != nil {
+			return runCtx.Err()
 		}
 
-		consCtx, consCancel := context.WithTimeout(ctx, 5*time.Second)
+		consCtx, consCancel := context.WithTimeout(runCtx, 5*time.Second)
 		consumer, err := js.CreateOrUpdateConsumer(consCtx, c.cfg.StreamName, jetstream.ConsumerConfig{
 			Durable:       consumerName,
 			FilterSubject: filterSubj,
@@ -267,21 +289,21 @@ func (c *Client) Run(ctx context.Context) error {
 		if err != nil {
 			c.logger.Warn("waiting for JetStream task stream/consumer", "stream", c.cfg.StreamName, "consumer", consumerName, "error", err)
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-runCtx.Done():
+				return runCtx.Err()
 			case <-time.After(2 * time.Second):
 				continue
 			}
 		}
 
-		if err := c.consumeLoop(ctx, nc, consumer, nodeID); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		if err := c.consumeLoop(runCtx, nc, consumer, nodeID); err != nil {
+			if runCtx.Err() != nil {
+				return runCtx.Err()
 			}
 			c.logger.Warn("JetStream consume loop interrupted; retrying", "error", err)
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-runCtx.Done():
+				return runCtx.Err()
 			case <-time.After(time.Second):
 			}
 		}

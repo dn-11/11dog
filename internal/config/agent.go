@@ -18,6 +18,7 @@ type AgentConfig struct {
 	StreamName            string            `yaml:"stream_name"`
 	TLSInsecureSkipVerify bool              `yaml:"tls_insecure_skip_verify"`
 	TLSCAFile             string            `yaml:"tls_ca_file"`
+	PIDFile               string            `yaml:"pid_file,omitempty"`
 	NodeID                string            `yaml:"node_id,omitempty"`
 	IPv4                  string            `yaml:"ipv4,omitempty"`
 	IPv6                  string            `yaml:"ipv6,omitempty"`
@@ -95,6 +96,9 @@ func applyAgentEnvOverrides(cfg *AgentConfig) {
 	}
 	if v := os.Getenv("DOG_TLS_CA_FILE"); v != "" {
 		cfg.TLSCAFile = strings.TrimSpace(v)
+	}
+	if v := os.Getenv("DOG_PID_FILE"); v != "" {
+		cfg.PIDFile = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_NODE_ID"); v != "" {
 		cfg.NodeID = strings.TrimSpace(v)
