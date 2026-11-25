@@ -158,7 +158,7 @@ func ServeInstallScript(cfg *config.ServerConfig, nodeStore store.NodeStore) htt
 			downloadBase = fmt.Sprintf("%s://%s/downloads", scheme, r.Host)
 		}
 
-		script := fmt.Sprintf(installScriptTemplate, downloadBase, natsAddr, cfg.NATS.StreamName, rec.MaxConcurrency, strings.TrimSpace(rec.Creds))
+		script := fmt.Sprintf(installScriptTemplate, downloadBase, natsAddr, rec.MaxConcurrency, strings.TrimSpace(rec.Creds))
 		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write([]byte(script))
@@ -187,7 +187,6 @@ set -euo pipefail
 
 DOWNLOAD_BASE=%q
 NATS_ADDR=%q
-STREAM_NAME=%q
 MAX_CONCURRENCY=%d
 
 INSTALL_DIR="/opt/11dog"
@@ -248,10 +247,8 @@ chmod 0640 "${CREDS_FILE}"
 cat > "${CONFIG_FILE}" <<EOF
 nats_addr: "${NATS_ADDR}"
 creds_file: "${CREDS_FILE}"
-stream_name: "${STREAM_NAME}"
 pid_file: "/opt/11dog/11dog-agent.pid"
 max_concurrency: ${MAX_CONCURRENCY}
-heartbeat_interval_sec: 10
 EOF
 chown root:11dog "${CONFIG_FILE}"
 chmod 0640 "${CONFIG_FILE}"

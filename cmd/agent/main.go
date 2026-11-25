@@ -31,8 +31,7 @@ func main() {
 	var (
 		configPath     = flag.String("config", "", "path to agent YAML configuration")
 		natsAddr       = flag.String("nats", "", "override NATS WebSocket URL (e.g. wss://nats.example.com)")
-		credsFile      = flag.String("creds", "", "override path to NATS .creds JWT/NKey file")
-		streamName     = flag.String("stream", "", "override NATS JetStream task stream name")
+		credsFile      = flag.String("creds", "", "override path to NATS .creds file")
 		maxConcurrency = flag.Uint("max-concurrency", 0, "override max concurrent probe tasks")
 		tlsInsecure    = flag.Bool("insecure", false, "skip TLS certificate verification")
 		showVer        = flag.Bool("version", false, "print agent version and exit")
@@ -56,9 +55,6 @@ func main() {
 	}
 	if *credsFile != "" {
 		cfg.CredsFile = *credsFile
-	}
-	if *streamName != "" {
-		cfg.StreamName = *streamName
 	}
 	if *maxConcurrency > 0 {
 		cfg.MaxConcurrency = uint32(*maxConcurrency)

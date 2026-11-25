@@ -110,8 +110,8 @@ const minimalAgentYaml = computed(() => {
   const addr = deployNATSAddr.value.trim() || defaultNATSAddr()
   return `nats_addr: "${addr}"
 creds_file: "/etc/11dog/agent.creds"
-max_concurrency: ${deployNode.value.max_concurrency || 8}
-heartbeat_interval_sec: 10`
+pid_file: "/opt/11dog/11dog-agent.pid"
+max_concurrency: ${deployNode.value.max_concurrency || 8}`
 })
 
 async function loadData(token: string): Promise<boolean> {

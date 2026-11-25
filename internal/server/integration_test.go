@@ -245,11 +245,8 @@ func registerDBNodeAndStartAgent(
 	cfg.NATSAddr = st.natsWSURL
 	cfg.Creds = creds
 	cfg.CredsFile = ""
-	cfg.StreamName = st.cfg.NATS.StreamName
-	// Deliberately set bogus local node_id to verify agent uses JWT authoritative name.
-	cfg.NodeID = "bogus-local-id"
+	cfg.PIDFile = ""
 	cfg.MaxConcurrency = maxConc
-	cfg.HeartbeatIntervalSec = 2
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

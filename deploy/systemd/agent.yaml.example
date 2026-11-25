@@ -1,17 +1,4 @@
-# 11Dog Edge Probe Agent (NATS WebSocket + Decentralized JWT/NKey .creds)
 nats_addr: "wss://nats.dn11.example"
 creds_file: "/etc/11dog/agent.creds"
-stream_name: "DOG_TASKS"
+pid_file: "/opt/11dog/11dog-agent.pid"
 max_concurrency: 8
-heartbeat_interval_sec: 10
-
-# Optional TLS settings (for wss:// NATS WebSocket endpoints)
-tls_ca_file: ""
-tls_insecure_skip_verify: false
-
-capabilities:
-  - ping
-  - tcping
-  - http
-  - traceroute
-  - dns

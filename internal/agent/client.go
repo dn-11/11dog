@@ -24,6 +24,19 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+const (
+	defaultStreamName = "DOG_TASKS"
+	heartbeatInterval = 10 * time.Second
+)
+
+var builtinCapabilities = []model.ProbeType{
+	model.ProbePing,
+	model.ProbeTcping,
+	model.ProbeHTTP,
+	model.ProbeTraceroute,
+	model.ProbeDNS,
+}
+
 // Version is set via ldflags at build time.
 var Version = "dev"
 
@@ -125,10 +138,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 	nodeID, err := natsauth.ExtractNodeIDFromCreds(credsBytes)
 	if err != nil {
-		if strings.TrimSpace(c.cfg.NodeID) == "" {
-			return fmt.Errorf("extract node_id from creds: %w", err)
-		}
-		nodeID = strings.TrimSpace(c.cfg.NodeID)
+		return fmt.Errorf("extract node_id from creds: %w", err)
 	}
 	safeID := natsauth.SanitizeSubjectToken(nodeID)
 
@@ -171,7 +181,7 @@ func (c *Client) Run(ctx context.Context) error {
 	c.logger.Info("connected to NATS with JWT/NKey credentials",
 		"nats_addr", c.cfg.NATSAddr,
 		"node_id", nodeID,
-		"stream", c.cfg.StreamName,
+		"stream", defaultStreamName,
 		"max_concurrency", cap(c.sem),
 		"version", Version,
 	)
@@ -220,18 +230,12 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	defer func() { _ = reconnectSub.Unsubscribe() }()
 
-	// Heartbeat loop (publish immediately on startup, then every heartbeat_interval_sec).
-	hbInterval := time.Duration(c.cfg.HeartbeatIntervalSec) * time.Second
-	if hbInterval < 2*time.Second {
-		hbInterval = 10 * time.Second
-	}
+	// Heartbeat loop (publish immediately on startup, then every 10s).
 	publishHB := func() {
 		cpuPct, memPct := readSysMetrics()
 		hb := model.AgentHeartbeat{
 			NodeID:          nodeID,
-			IPv4:            c.cfg.IPv4,
-			IPv6:            c.cfg.IPv6,
-			Capabilities:    c.cfg.Capabilities,
+			Capabilities:    builtinCapabilities,
 			MaxConcurrency:  uint32(cap(c.sem)),
 			ActiveTasks:     uint32(c.activeTasks.Load()),
 			CPUPercent:      cpuPct,
@@ -241,7 +245,6 @@ func (c *Client) Run(ctx context.Context) error {
 			Arch:            runtime.GOARCH,
 			TimestampUnixMs: time.Now().UnixMilli(),
 			ConnectedAtMs:   connectedAtMs,
-			Labels:          c.cfg.Labels,
 		}
 		if payload, err := json.Marshal(hb); err == nil {
 			_ = nc.Publish("agent.hb."+safeID, payload)
@@ -255,7 +258,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 
 	go func() {
-		ticker := time.NewTicker(hbInterval)
+		ticker := time.NewTicker(heartbeatInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -277,7 +280,7 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		consCtx, consCancel := context.WithTimeout(runCtx, 5*time.Second)
-		consumer, err := js.CreateOrUpdateConsumer(consCtx, c.cfg.StreamName, jetstream.ConsumerConfig{
+		consumer, err := js.CreateOrUpdateConsumer(consCtx, defaultStreamName, jetstream.ConsumerConfig{
 			Durable:       consumerName,
 			FilterSubject: filterSubj,
 			AckPolicy:     jetstream.AckExplicitPolicy,
@@ -287,7 +290,7 @@ func (c *Client) Run(ctx context.Context) error {
 		})
 		consCancel()
 		if err != nil {
-			c.logger.Warn("waiting for JetStream task stream/consumer", "stream", c.cfg.StreamName, "consumer", consumerName, "error", err)
+			c.logger.Warn("waiting for JetStream task stream/consumer", "stream", defaultStreamName, "consumer", consumerName, "error", err)
 			select {
 			case <-runCtx.Done():
 				return runCtx.Err()
