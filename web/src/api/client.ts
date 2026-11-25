@@ -1,7 +1,6 @@
 import type {
   AdminBatchUpdateResponse,
   AdminCreateNodeRequest,
-  AdminNATSConfigResponse,
   AdminNodeInfo,
   AdminOverview,
   AdminTriggerUpdateRequest,
@@ -44,14 +43,6 @@ export async function fetchAdminOverview(adminToken: string): Promise<AdminOverv
   })
   if (!resp.ok) throw new Error(await parseError(resp))
   return (await resp.json()) as AdminOverview
-}
-
-export async function fetchAdminNATSConfig(adminToken: string): Promise<AdminNATSConfigResponse> {
-  const resp = await fetch('/api/v1/admin/nats-config', {
-    headers: { 'X-Admin-Token': adminToken }
-  })
-  if (!resp.ok) throw new Error(await parseError(resp))
-  return (await resp.json()) as AdminNATSConfigResponse
 }
 
 export async function fetchAdminNodes(adminToken: string): Promise<AdminNodeInfo[]> {

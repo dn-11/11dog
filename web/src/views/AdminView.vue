@@ -4,7 +4,6 @@ import {
   createAdminNode,
   deleteAdminNode,
   disconnectAdminNode,
-  fetchAdminNATSConfig,
   fetchAdminNodes,
   fetchAdminOverview,
   fetchAdminTargetPolicy,
@@ -14,7 +13,7 @@ import {
   updateAdminNode,
   updateAdminTargetPolicy
 } from '@/api/client'
-import type { AdminNATSConfigResponse, AdminNodeInfo, AdminOverview, TargetPolicy } from '@/types/api'
+import type { AdminNodeInfo, AdminOverview, TargetPolicy } from '@/types/api'
 
 const TOKEN_STORAGE_KEY = '11dog_admin_token'
 
@@ -57,10 +56,6 @@ const editForm = ref({
 // Hosted Install Script Modal state
 const deployNode = ref<AdminNodeInfo | null>(null)
 const deployNATSAddr = ref('')
-
-// NATS Server Config Export Modal state
-const showNATSConfigModal = ref(false)
-const natsConfigData = ref<AdminNATSConfigResponse | null>(null)
 
 // Agent Self-Update Modal state
 const showUpdateModal = ref(false)
@@ -243,16 +238,6 @@ function openDeployModal(n: AdminNodeInfo) {
     deployNATSAddr.value = overview.value.public_nats_url
   } else if (!deployNATSAddr.value) {
     deployNATSAddr.value = defaultNATSAddr()
-  }
-}
-
-async function openNATSConfigModal() {
-  actionErr.value = ''
-  try {
-    natsConfigData.value = await fetchAdminNATSConfig(adminToken.value)
-    showNATSConfigModal.value = true
-  } catch (err) {
-    actionErr.value = err instanceof Error ? err.message : '获取 NATS 配置失败'
   }
 }
 
@@ -497,9 +482,6 @@ onUnmounted(() => {
           </span>
         </div>
         <div class="header-actions">
-          <button type="button" class="btn btn-outline btn-sm" @click="openNATSConfigModal">
-            导出 NATS 配置
-          </button>
           <button type="button" class="btn btn-success btn-sm" @click="openCreateModal">
             + 新增节点
           </button>
@@ -920,33 +902,6 @@ onUnmounted(() => {
                 </button>
               </div>
               <pre class="mono guide-pre">{{ uninstallCmd }}</pre>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- NATS Server Config Export Modal -->
-      <div v-if="showNATSConfigModal && natsConfigData" class="modal-backdrop" @click.self="showNATSConfigModal = false">
-        <div class="card modal-card wide">
-          <div class="card-header">
-            <span>导出 NATS Server 配置（nats-server.conf）</span>
-            <div class="header-actions">
-              <span v-if="copiedTip" class="badge badge-green">{{ copiedTip }}</span>
-              <button type="button" class="btn btn-outline btn-sm" @click="showNATSConfigModal = false">关闭</button>
-            </div>
-          </div>
-          <div class="card-body">
-            <p class="deploy-hint">
-              将以下配置保存为 <code class="mono">nats-server.conf</code> 并启动 <code class="mono">nats-server -c nats-server.conf</code>，NATS 即可直接校验本平台签发的所有 Agent <code class="mono">.creds</code> 凭据。
-            </p>
-            <div class="code-section" style="margin-bottom: 0">
-              <div class="code-head">
-                <span>Operator: {{ natsConfigData.operator_pub.slice(0, 14) }}… · Account: {{ natsConfigData.account_pub.slice(0, 14) }}…</span>
-                <button type="button" class="btn btn-primary btn-sm" @click="copyText('nats-server.conf', natsConfigData.config)">
-                  复制 nats-server.conf
-                </button>
-              </div>
-              <pre class="mono guide-pre">{{ natsConfigData.config }}</pre>
             </div>
           </div>
         </div>

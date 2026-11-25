@@ -23,18 +23,7 @@ import (
 	"github.com/11dog/11dog/internal/store"
 )
 
-const (
-	settingNATSOperatorSeed = "nats_operator_seed"
-	settingNATSAccountSeed  = "nats_account_seed"
-)
-
 func main() {
-	subcmd := ""
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		subcmd = os.Args[1]
-		os.Args = append(os.Args[:1], os.Args[2:]...)
-	}
-
 	var (
 		configPath = flag.String("config", "", "path to server YAML configuration")
 		httpAddr   = flag.String("http-listen", "", "override HTTP listen address (e.g. :8080)")
@@ -43,7 +32,7 @@ func main() {
 	)
 	flag.Parse()
 
-	if *showVer || subcmd == "version" {
+	if *showVer {
 		fmt.Printf("11dog-server %s\n", server.Version)
 		return
 	}
@@ -69,20 +58,14 @@ func main() {
 	}
 	defer func() { _ = nodeStore.Close() }()
 
-	authMgr, err := loadOrInitNATSAuth(context.Background(), nodeStore, cfg)
+	authMgr, err := natsauth.NewManager(cfg.NATS.AccountSeed, cfg.NATS.StreamName)
 	if err != nil {
-		logger.Error("failed to initialize NATS JWT/NKey authority", "error", err)
+		logger.Error("failed to initialize NATS account signer (ensure nats.account_seed / DOG_NATS_ACCOUNT_SEED is configured)", "error", err)
 		os.Exit(1)
 	}
 
-	if subcmd == "nats-config" {
-		fmt.Print(authMgr.RenderNATSServerConfig("/data/jetstream"))
-		return
-	}
-
-	logger.Info("initialized node database & NATS JWT authority",
+	logger.Info("initialized node database & NATS account signer",
 		"driver", cfg.DB.Driver,
-		"operator_pub", authMgr.OperatorPub(),
 		"account_pub", authMgr.AccountPub(),
 	)
 
@@ -196,39 +179,6 @@ func main() {
 	defer shutCancel()
 	_ = httpSrv.Shutdown(shutCtx)
 	logger.Info("11dog-server stopped")
-}
-
-func loadOrInitNATSAuth(ctx context.Context, st store.NodeStore, cfg *config.ServerConfig) (*natsauth.Manager, error) {
-	opSeed := strings.TrimSpace(cfg.NATS.OperatorSeed)
-	accSeed := strings.TrimSpace(cfg.NATS.AccountSeed)
-
-	if opSeed == "" {
-		if saved, _, err := st.GetSetting(ctx, settingNATSOperatorSeed); err == nil {
-			opSeed = strings.TrimSpace(saved)
-		}
-	}
-	if accSeed == "" {
-		if saved, _, err := st.GetSetting(ctx, settingNATSAccountSeed); err == nil {
-			accSeed = strings.TrimSpace(saved)
-		}
-	}
-
-	mgr, err := natsauth.NewManager(opSeed, accSeed, cfg.NATS.StreamName)
-	if err != nil {
-		return nil, err
-	}
-
-	if opSeed == "" {
-		if _, err := st.SetSetting(ctx, settingNATSOperatorSeed, mgr.OperatorSeed()); err != nil {
-			return nil, fmt.Errorf("persist generated operator seed: %w", err)
-		}
-	}
-	if accSeed == "" {
-		if _, err := st.SetSetting(ctx, settingNATSAccountSeed, mgr.AccountSeed()); err != nil {
-			return nil, fmt.Errorf("persist generated account seed: %w", err)
-		}
-	}
-	return mgr, nil
 }
 
 func buildNATSTLSConfig(caFile string, insecureSkip bool) (*tls.Config, error) {

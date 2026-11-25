@@ -42,14 +42,13 @@ type ServerAuthConfig struct {
 	AdminToken string `yaml:"admin_token"`
 }
 
-// NATSConfig configures the external NATS JetStream cluster and JWT/NKey signing authority.
+// NATSConfig configures the external NATS JetStream cluster and Account signing seed.
 type NATSConfig struct {
 	URL                   string `yaml:"url"`
 	PublicURL             string `yaml:"public_url"`
 	StreamName            string `yaml:"stream_name"`
 	MaxQueuePerNode       int    `yaml:"max_queue_per_node"`
 	TaskTTLSec            int    `yaml:"task_ttl_sec"`
-	OperatorSeed          string `yaml:"operator_seed"`
 	AccountSeed           string `yaml:"account_seed"`
 	TLSCAFile             string `yaml:"tls_ca_file"`
 	TLSInsecureSkipVerify bool   `yaml:"tls_insecure_skip_verify"`
@@ -188,9 +187,6 @@ func applyServerEnvOverrides(cfg *ServerConfig) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.NATS.TaskTTLSec = n
 		}
-	}
-	if v := os.Getenv("DOG_NATS_OPERATOR_SEED"); v != "" {
-		cfg.NATS.OperatorSeed = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("DOG_NATS_ACCOUNT_SEED"); v != "" {
 		cfg.NATS.AccountSeed = strings.TrimSpace(v)

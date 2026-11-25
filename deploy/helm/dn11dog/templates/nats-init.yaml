@@ -1,0 +1,175 @@
+{{- if not .Values.nats.auth.existingSecret }}
+{{- if .Values.nats.auth.autoInit }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dn11dog.fullname" . }}-nats-init
+  labels:
+    {{- include "dn11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-init
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dn11dog.fullname" . }}-nats-init
+  labels:
+    {{- include "dn11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-init
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dn11dog.fullname" . }}-nats-init
+  labels:
+    {{- include "dn11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-init
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dn11dog.fullname" . }}-nats-init
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dn11dog.fullname" . }}-nats-init
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dn11dog.fullname" . }}-nats-init
+  labels:
+    {{- include "dn11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-init
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "dn11dog.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nats-init
+    spec:
+      serviceAccountName: {{ include "dn11dog.fullname" . }}-nats-init
+      restartPolicy: OnFailure
+      containers:
+        - name: nats-init
+          image: "{{ .Values.nats.auth.initImage.repository }}:{{ .Values.nats.auth.initImage.tag }}"
+          imagePullPolicy: {{ .Values.nats.auth.initImage.pullPolicy }}
+          env:
+            - name: SECRET_NAME
+              value: {{ include "dn11dog.natsAuthSecretName" . | quote }}
+            - name: POD_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+          command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              K8S_API="https://kubernetes.default.svc"
+              SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+              CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+                --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                "${K8S_API}/api/v1/namespaces/${POD_NAMESPACE}/secrets/${SECRET_NAME}")"
+              if [ "${CODE}" = "200" ]; then
+                echo "Secret ${SECRET_NAME} already exists; skipping NATS JWT initialization."
+                exit 0
+              fi
+
+              export XDG_DATA_HOME=/tmp/nsc-data
+              export XDG_CONFIG_HOME=/tmp/nsc-config
+              export NKEYS_PATH=/tmp/nsc-keys
+
+              echo "Initializing NATS Operator, SYS account, and 11dog JetStream account..."
+              nsc add operator --name 11dog --sys
+              nsc add account --name 11dog
+              nsc edit account --name 11dog \
+                --js-mem-storage -1 \
+                --js-disk-storage -1 \
+                --js-streams -1 \
+                --js-consumer -1 \
+                --js-max-ack-pending -1
+
+              nsc generate config --mem-resolver > /tmp/nats-auth.conf
+              ACC_PUB="$(nsc describe account --name 11dog --json | jq -r '.sub')"
+              ACC_SEED="$(find "${NKEYS_PATH}" -name "${ACC_PUB}.nk" -exec cat {} + | tr -d '\r\n')"
+              if [ -z "${ACC_PUB}" ] || [ -z "${ACC_SEED}" ]; then
+                echo "Failed to extract NATS account keypair" >&2
+                exit 1
+              fi
+
+              jq -n \
+                --arg name "${SECRET_NAME}" \
+                --arg ns "${POD_NAMESPACE}" \
+                --arg seed "${ACC_SEED}" \
+                --arg pub "${ACC_PUB}" \
+                --rawfile conf /tmp/nats-auth.conf \
+                '{
+                  apiVersion: "v1",
+                  kind: "Secret",
+                  metadata: {
+                    name: $name,
+                    namespace: $ns,
+                    labels: {
+                      "app.kubernetes.io/managed-by": "Helm",
+                      "app.kubernetes.io/component": "nats-auth"
+                    }
+                  },
+                  type: "Opaque",
+                  stringData: {
+                    "account-seed": $seed,
+                    "account-pub": $pub,
+                    "nats-auth.conf": $conf
+                  }
+                }' > /tmp/secret.json
+
+              RESP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' \
+                --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -X POST \
+                --data-binary @/tmp/secret.json \
+                "${K8S_API}/api/v1/namespaces/${POD_NAMESPACE}/secrets")"
+              if [ "${RESP_CODE}" != "201" ] && [ "${RESP_CODE}" != "409" ]; then
+                echo "Failed to create Secret ${SECRET_NAME} (HTTP ${RESP_CODE}):" >&2
+                cat /tmp/resp.json >&2
+                exit 1
+              fi
+              echo "Successfully initialized NATS JWT Secret ${SECRET_NAME} (Account: ${ACC_PUB})."
+{{- else }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "dn11dog.natsAuthSecretName" . }}
+  labels:
+    {{- include "dn11dog.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-auth
+type: Opaque
+stringData:
+  account-seed: {{ required "nats.auth.accountSeed is required when nats.auth.autoInit=false and existingSecret is empty" .Values.nats.auth.accountSeed | quote }}
+  {{- if .Values.nats.auth.natsAuthConf }}
+  nats-auth.conf: |
+    {{- .Values.nats.auth.natsAuthConf | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

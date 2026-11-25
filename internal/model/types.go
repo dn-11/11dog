@@ -172,13 +172,6 @@ type AdminOverview struct {
 	SubtasksCompletedTotal int64    `json:"subtasks_completed_total"`
 }
 
-// AdminNATSConfigResponse exposes the generated nats-server.conf snippet and JWT public keys.
-type AdminNATSConfigResponse struct {
-	OperatorPub string `json:"operator_pub"`
-	AccountPub  string `json:"account_pub"`
-	Config      string `json:"config"`
-}
-
 // AgentHeartbeat is published periodically by edge agents over Core NATS (agent.hb.<nodeID>).
 type AgentHeartbeat struct {
 	NodeID          string            `json:"node_id"`

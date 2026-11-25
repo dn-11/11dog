@@ -22,9 +22,7 @@ nats:
   stream_name: "DOG_TASKS"
   max_queue_per_node: 20
   task_ttl_sec: 60
-  # 留空时首次启动自动生成 Operator/Account Seed 并持久化到数据库 settings 表；
-  # 可运行 `11dog-server nats-config` 或在后台点击「导出 NATS 配置」生成 nats-server.conf
-  operator_seed: ""
+  # 由 Helm 或外部 nsc 初始化生成的 NATS Account NKey Seed (SA...)，必填（也可通过 DOG_NATS_ACCOUNT_SEED 注入）
   account_seed: ""
   tls_ca_file: ""
   tls_insecure_skip_verify: false

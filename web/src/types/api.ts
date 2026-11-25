@@ -139,12 +139,6 @@ export interface AdminOverview {
   subtasks_completed_total: number
 }
 
-export interface AdminNATSConfigResponse {
-  operator_pub: string
-  account_pub: string
-  config: string
-}
-
 export interface PingParams {
   count?: number
   interval_ms?: number

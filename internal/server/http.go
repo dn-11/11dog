@@ -85,22 +85,6 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		writeJSON(w, http.StatusOK, orch.AdminOverview())
 	})
 
-	mux.HandleFunc("GET /api/v1/admin/nats-config", func(w http.ResponseWriter, r *http.Request) {
-		if !requireAdmin(cfg, w, r) {
-			return
-		}
-		authMgr := hub.AuthManager()
-		if authMgr == nil {
-			writeError(w, http.StatusServiceUnavailable, "NATS JWT 密钥管理器未初始化")
-			return
-		}
-		writeJSON(w, http.StatusOK, model.AdminNATSConfigResponse{
-			OperatorPub: authMgr.OperatorPub(),
-			AccountPub:  authMgr.AccountPub(),
-			Config:      authMgr.RenderNATSServerConfig("/data/jetstream"),
-		})
-	})
-
 	mux.HandleFunc("GET /api/v1/admin/nodes", func(w http.ResponseWriter, r *http.Request) {
 		if !requireAdmin(cfg, w, r) {
 			return

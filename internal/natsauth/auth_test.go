@@ -3,24 +3,30 @@ package natsauth
 import (
 	"strings"
 	"testing"
+
+	"github.com/nats-io/nkeys"
 )
 
-func TestManagerIssueCredsAndRenderConfig(t *testing.T) {
-	mgr, err := NewManager("", "", "DOG_TASKS")
+func TestManagerIssueCreds(t *testing.T) {
+	if _, err := NewManager("", "DOG_TASKS"); err == nil {
+		t.Fatal("expected error when account seed is empty")
+	}
+
+	accKP, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accSeed, err := accKP.Seed()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := NewManager(string(accSeed), "DOG_TASKS")
 	if err != nil {
 		t.Fatalf("NewManager failed: %v", err)
 	}
-	if !strings.HasPrefix(mgr.OperatorPub(), "O") || !strings.HasPrefix(mgr.AccountPub(), "A") {
-		t.Fatalf("unexpected keys: op=%s acc=%s", mgr.OperatorPub(), mgr.AccountPub())
-	}
-
-	// Reload with same seeds produces identical public keys.
-	mgr2, err := NewManager(mgr.OperatorSeed(), mgr.AccountSeed(), "DOG_TASKS")
-	if err != nil {
-		t.Fatalf("reload NewManager failed: %v", err)
-	}
-	if mgr2.OperatorPub() != mgr.OperatorPub() || mgr2.AccountPub() != mgr.AccountPub() {
-		t.Fatal("reloaded keys do not match")
+	if !strings.HasPrefix(mgr.AccountPub(), "A") {
+		t.Fatalf("unexpected account pub: %s", mgr.AccountPub())
 	}
 
 	creds, err := mgr.IssueAgentCreds("node-hk-01")
@@ -30,11 +36,5 @@ func TestManagerIssueCredsAndRenderConfig(t *testing.T) {
 	nodeID, err := ExtractNodeIDFromCreds([]byte(creds))
 	if err != nil || nodeID != "node-hk-01" {
 		t.Fatalf("ExtractNodeIDFromCreds = (%q, %v), want (node-hk-01, nil)", nodeID, err)
-	}
-
-	conf := mgr.RenderNATSServerConfig("/data/js")
-	if !strings.Contains(conf, "operator: "+mgr.OperatorJWT()) ||
-		!strings.Contains(conf, mgr.AccountPub()+": "+mgr.AccountJWT()) {
-		t.Fatalf("unexpected nats-server.conf:\n%s", conf)
 	}
 }

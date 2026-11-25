@@ -27,135 +27,45 @@ func SanitizeSubjectToken(s string) string {
 	return b.String()
 }
 
-// Manager holds the NATS Operator and Account signing keys and issues scoped User .creds JWTs.
+// Manager holds the NATS Account signing key (provisioned externally, e.g. via Helm)
+// and issues scoped User .creds JWTs for 11dog-server and edge probe agents.
 type Manager struct {
-	operatorSeed string
-	operatorPub  string
-	operatorJWT  string
-
-	sysAccountPub string
-	sysAccountJWT string
-
-	accountKP   nkeys.KeyPair
-	accountSeed string
-	accountPub  string
-	accountJWT  string
-
+	accountKP  nkeys.KeyPair
+	accountPub string
 	streamName string
 }
 
-// NewManager initializes a NATS JWT/NKey authority. Empty seeds are freshly generated.
-func NewManager(operatorSeed, accountSeed, streamName string) (*Manager, error) {
+// NewManager initializes a NATS User JWT signer from an externally provisioned Account NKey Seed (SA...).
+func NewManager(accountSeed, streamName string) (*Manager, error) {
+	accountSeed = strings.TrimSpace(accountSeed)
+	if accountSeed == "" {
+		return nil, errors.New("nats.account_seed (or DOG_NATS_ACCOUNT_SEED) is required")
+	}
 	if strings.TrimSpace(streamName) == "" {
 		streamName = "DOG_TASKS"
 	}
 
-	var opKP nkeys.KeyPair
-	var err error
-	operatorSeed = strings.TrimSpace(operatorSeed)
-	if operatorSeed == "" {
-		opKP, err = nkeys.CreateOperator()
-		if err != nil {
-			return nil, fmt.Errorf("create operator keypair: %w", err)
-		}
-		seedBytes, err := opKP.Seed()
-		if err != nil {
-			return nil, fmt.Errorf("export operator seed: %w", err)
-		}
-		operatorSeed = string(seedBytes)
-	} else {
-		opKP, err = nkeys.FromSeed([]byte(operatorSeed))
-		if err != nil {
-			return nil, fmt.Errorf("parse operator seed: %w", err)
-		}
-	}
-	opPub, err := opKP.PublicKey()
+	accKP, err := nkeys.FromSeed([]byte(accountSeed))
 	if err != nil {
-		return nil, fmt.Errorf("operator public key: %w", err)
-	}
-
-	var accKP nkeys.KeyPair
-	accountSeed = strings.TrimSpace(accountSeed)
-	if accountSeed == "" {
-		accKP, err = nkeys.CreateAccount()
-		if err != nil {
-			return nil, fmt.Errorf("create account keypair: %w", err)
-		}
-		seedBytes, err := accKP.Seed()
-		if err != nil {
-			return nil, fmt.Errorf("export account seed: %w", err)
-		}
-		accountSeed = string(seedBytes)
-	} else {
-		accKP, err = nkeys.FromSeed([]byte(accountSeed))
-		if err != nil {
-			return nil, fmt.Errorf("parse account seed: %w", err)
-		}
+		return nil, fmt.Errorf("parse nats account seed: %w", err)
 	}
 	accPub, err := accKP.PublicKey()
 	if err != nil {
-		return nil, fmt.Errorf("account public key: %w", err)
+		return nil, fmt.Errorf("derive nats account public key: %w", err)
 	}
-
-	sysKP, err := nkeys.CreateAccount()
-	if err != nil {
-		return nil, fmt.Errorf("create system account keypair: %w", err)
-	}
-	sysPub, err := sysKP.PublicKey()
-	if err != nil {
-		return nil, fmt.Errorf("system account public key: %w", err)
-	}
-	sysClaims := jwt.NewAccountClaims(sysPub)
-	sysClaims.Name = "SYS"
-	sysJWT, err := sysClaims.Encode(opKP)
-	if err != nil {
-		return nil, fmt.Errorf("encode system account jwt: %w", err)
-	}
-
-	opClaims := jwt.NewOperatorClaims(opPub)
-	opClaims.Name = "11dog-operator"
-	opClaims.SystemAccount = sysPub
-	opJWT, err := opClaims.Encode(opKP)
-	if err != nil {
-		return nil, fmt.Errorf("encode operator jwt: %w", err)
-	}
-
-	accClaims := jwt.NewAccountClaims(accPub)
-	accClaims.Name = "11dog"
-	accClaims.Limits.JetStreamLimits = jwt.JetStreamLimits{
-		MemoryStorage:        jwt.NoLimit,
-		DiskStorage:          jwt.NoLimit,
-		Streams:              jwt.NoLimit,
-		Consumer:             jwt.NoLimit,
-		MemoryMaxStreamBytes: jwt.NoLimit,
-		DiskMaxStreamBytes:   jwt.NoLimit,
-		MaxAckPending:        jwt.NoLimit,
-	}
-	accJWT, err := accClaims.Encode(opKP)
-	if err != nil {
-		return nil, fmt.Errorf("encode account jwt: %w", err)
+	if !strings.HasPrefix(accPub, "A") {
+		return nil, fmt.Errorf("expected NATS Account seed (public key starting with A), got %q", accPub)
 	}
 
 	return &Manager{
-		operatorSeed:  operatorSeed,
-		operatorPub:   opPub,
-		operatorJWT:   opJWT,
-		sysAccountPub: sysPub,
-		sysAccountJWT: sysJWT,
-		accountKP:     accKP,
-		accountSeed:   accountSeed,
-		accountPub:    accPub,
-		accountJWT:    accJWT,
-		streamName:    streamName,
+		accountKP:  accKP,
+		accountPub: accPub,
+		streamName: streamName,
 	}, nil
 }
 
-func (m *Manager) OperatorSeed() string { return m.operatorSeed }
-func (m *Manager) OperatorPub() string  { return m.operatorPub }
-func (m *Manager) OperatorJWT() string  { return m.operatorJWT }
-func (m *Manager) AccountSeed() string  { return m.accountSeed }
-func (m *Manager) AccountPub() string   { return m.accountPub }
-func (m *Manager) AccountJWT() string   { return m.accountJWT }
+// AccountPub returns the NATS Account public key (A...).
+func (m *Manager) AccountPub() string { return m.accountPub }
 
 // IssueServerCreds mints a full-privilege User JWT and NKey seed for 11dog-server inside the account.
 func (m *Manager) IssueServerCreds() (userJWT string, userSeed string, creds string, err error) {
@@ -259,36 +169,4 @@ func ExtractNodeIDFromCreds(creds []byte) (string, error) {
 		return "", errors.New("creds jwt has empty user name")
 	}
 	return strings.TrimSpace(claims.Name), nil
-}
-
-// RenderNATSServerConfig generates a ready-to-use nats-server.conf snippet using MEMORY resolver preload.
-func (m *Manager) RenderNATSServerConfig(storeDir string) string {
-	if strings.TrimSpace(storeDir) == "" {
-		storeDir = "/data/jetstream"
-	}
-	return fmt.Sprintf(`# Generated by 11dog-server (NATS Decentralized JWT/NKey Auth)
-# Place this in nats-server.conf and start with: nats-server -c nats-server.conf
-
-port: 4222
-http_port: 8222
-
-jetstream {
-  store_dir: %q
-}
-
-# Optional: enable WebSocket listener so agents can connect via wss:// behind Nginx/Ingress
-# websocket {
-#   port: 8443
-#   no_tls: true
-# }
-
-operator: %s
-system_account: %s
-
-resolver: MEMORY
-resolver_preload: {
-  %s: %s
-  %s: %s
-}
-`, storeDir, m.operatorJWT, m.sysAccountPub, m.sysAccountPub, m.sysAccountJWT, m.accountPub, m.accountJWT)
 }

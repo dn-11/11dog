@@ -1,4 +1,4 @@
-# Set replicaCount=1 when db.driver=sqlite; switch db.driver=postgres & mq.driver=nats for multi-replica HA.
+# Set replicaCount=1 when db.driver=sqlite; switch db.driver=postgres for multi-replica HA.
 replicaCount: 1
 
 image:
@@ -13,9 +13,6 @@ fullnameOverride: ""
 
 siteTitle: "11Dog - DN11 网络测速平台"
 networkName: "DN11"
-# Reverse-gRPC WebSocket URL shown to agents / written into install scripts.
-# Leave empty to automatically derive "ws(s)://<browser host>/api/v1/agent/ws".
-publicWSAddr: ""
 agentDownloadBaseURL: ""
 
 auth:
@@ -35,21 +32,27 @@ db:
       size: 1Gi
       storageClassName: ""
 
-mq:
-  # driver: "nats" (recommended for durable buffering & multi-replica) or "memory"
-  driver: "nats"
-  # Leave empty to automatically point to the bundled NATS StatefulSet when nats.enabled=true
-  natsUrl: ""
+nats:
+  # Deploy bundled JetStream NATS StatefulSet with decentralized JWT/NKey authentication.
+  # Set enabled=false to point to an external NATS cluster via nats.url.
+  enabled: true
+  # Internal NATS URL used by 11dog-server. Defaults to nats://<fullname>-nats:4222 when nats.enabled=true.
+  url: ""
+  # External NATS URL written into agent install scripts (e.g. nats://nats.example.com:4222 or wss://nats.example.com).
+  publicUrl: ""
   streamName: "DOG_TASKS"
   maxQueuePerNode: 20
   taskTTLSec: 60
-
-nats:
-  enabled: true
+  tlsCAFile: ""
+  tlsInsecureSkipVerify: false
   image:
     repository: nats
     tag: "2.10-alpine"
     pullPolicy: IfNotPresent
+  websocket:
+    # Expose NATS WebSocket listener (8443) so edge agents can connect over wss:// behind Ingress/Nginx.
+    enabled: true
+    port: 8443
   storageSize: 1Gi
   storageClassName: ""
   resources:
@@ -59,6 +62,19 @@ nats:
     limits:
       cpu: 500m
       memory: 256Mi
+  auth:
+    # Use an existing Secret containing `account-seed` (and `nats-auth.conf` when nats.enabled=true).
+    existingSecret: ""
+    # Automatically initialize NATS Operator/SYS/11dog Account JWTs via a Helm pre-install/pre-upgrade Job
+    # using natsio/nats-box (nsc). Idempotent: skips generation if the Secret already exists.
+    autoInit: true
+    initImage:
+      repository: natsio/nats-box
+      tag: "0.14.5"
+      pullPolicy: IfNotPresent
+    # Manual values used only when autoInit=false and existingSecret=""
+    accountSeed: ""
+    natsAuthConf: ""
 
 limits:
   rateLimitRPM: 180
@@ -86,7 +102,6 @@ dn11Prefixes:
     owner: "DN11 IPv6 Backbone"
     region: "DN11"
 
-# Single Service exposing the HTTP port (Web / API / SSE / Agent WebSocket); Ingress / Gateway is left to the user.
 service:
   type: ClusterIP
   httpPort: 8080

@@ -34,8 +34,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "dn11dog.natsUrl" -}}
-{{- if .Values.mq.natsUrl -}}
-{{- .Values.mq.natsUrl -}}
+{{- if .Values.nats.url -}}
+{{- .Values.nats.url -}}
 {{- else -}}
 {{- printf "nats://%s-nats:4222" (include "dn11dog.fullname" .) -}}
 {{- end -}}
@@ -49,3 +49,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "dn11dog.natsAuthSecretName" -}}
+{{- if .Values.nats.auth.existingSecret -}}
+{{- .Values.nats.auth.existingSecret -}}
+{{- else -}}
+{{- printf "%s-nats-auth" (include "dn11dog.fullname" .) -}}
+{{- end -}}
+{{- end -}}

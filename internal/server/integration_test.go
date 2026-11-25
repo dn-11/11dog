@@ -27,7 +27,9 @@ import (
 	"github.com/11dog/11dog/internal/natsauth"
 	"github.com/11dog/11dog/internal/server"
 	"github.com/11dog/11dog/internal/store"
+	"github.com/nats-io/jwt/v2"
 	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nkeys"
 )
 
 type testStack struct {
@@ -41,21 +43,69 @@ type testStack struct {
 	httpSrv *httptest.Server
 }
 
-func startTestNATSServer(t *testing.T, authMgr *natsauth.Manager) *natsserver.Server {
+func startTestNATSServer(t *testing.T) (*natsserver.Server, string) {
 	t.Helper()
+	opKP, err := nkeys.CreateOperator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opPub, _ := opKP.PublicKey()
+
+	sysKP, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sysPub, _ := sysKP.PublicKey()
+	sysClaims := jwt.NewAccountClaims(sysPub)
+	sysClaims.Name = "SYS"
+	sysJWT, err := sysClaims.Encode(opKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opClaims := jwt.NewOperatorClaims(opPub)
+	opClaims.Name = "11dog-test-operator"
+	opClaims.SystemAccount = sysPub
+	opJWT, err := opClaims.Encode(opKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accKP, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatal(err)
+	}
+	accPub, _ := accKP.PublicKey()
+	accSeed, _ := accKP.Seed()
+	accClaims := jwt.NewAccountClaims(accPub)
+	accClaims.Name = "11dog"
+	accClaims.Limits.JetStreamLimits = jwt.JetStreamLimits{
+		MemoryStorage:        jwt.NoLimit,
+		DiskStorage:          jwt.NoLimit,
+		Streams:              jwt.NoLimit,
+		Consumer:             jwt.NoLimit,
+		MemoryMaxStreamBytes: jwt.NoLimit,
+		DiskMaxStreamBytes:   jwt.NoLimit,
+		MaxAckPending:        jwt.NoLimit,
+	}
+	accJWT, err := accClaims.Encode(opKP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	storeDir := t.TempDir()
 	confPath := filepath.Join(t.TempDir(), "nats-server.conf")
-	confContent := authMgr.RenderNATSServerConfig(storeDir)
-	// Use random free port on localhost in tests and disable HTTP monitor port.
-	confContent = strings.Replace(confContent, "port: 4222", "host: 127.0.0.1\nport: -1", 1)
-	confContent = strings.Replace(confContent, "http_port: 8222", "", 1)
+	confContent := "host: 127.0.0.1\nport: -1\njetstream {\n  store_dir: " + strconv.Quote(storeDir) + "\n}\n" +
+		"operator: " + opJWT + "\n" +
+		"system_account: " + sysPub + "\n" +
+		"resolver: MEMORY\nresolver_preload: {\n  " + sysPub + ": " + sysJWT + "\n  " + accPub + ": " + accJWT + "\n}\n"
 	if err := os.WriteFile(confPath, []byte(confContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	opts := &natsserver.Options{}
 	if err := opts.ProcessConfigFile(confPath); err != nil {
-		t.Fatalf("parse generated nats-server.conf: %v\n%s", err, confContent)
+		t.Fatalf("parse test nats-server.conf: %v\n%s", err, confContent)
 	}
 	ns, err := natsserver.NewServer(opts)
 	if err != nil {
@@ -71,7 +121,7 @@ func startTestNATSServer(t *testing.T, authMgr *natsauth.Manager) *natsserver.Se
 	t.Cleanup(func() {
 		ns.Shutdown()
 	})
-	return ns
+	return ns, string(accSeed)
 }
 
 func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
@@ -83,13 +133,14 @@ func startTestStack(t *testing.T, maxQueuePerNode int) *testStack {
 	cfg.Limits.RateLimitRPM = 600
 	cfg.Limits.RateLimitBurst = 100
 
-	authMgr, err := natsauth.NewManager("", "", cfg.NATS.StreamName)
+	ns, accSeed := startTestNATSServer(t)
+	cfg.NATS.URL = ns.ClientURL()
+	cfg.NATS.AccountSeed = accSeed
+
+	authMgr, err := natsauth.NewManager(accSeed, cfg.NATS.StreamName)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	ns := startTestNATSServer(t, authMgr)
-	cfg.NATS.URL = ns.ClientURL()
 
 	nodeStore, err := store.NewSQLStore("sqlite", ":memory:")
 	if err != nil {
@@ -395,7 +446,7 @@ func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{"/api/v1/admin/overview", "/api/v1/admin/nodes", "/api/v1/admin/nats-config"} {
+	for _, path := range []string{"/api/v1/admin/overview", "/api/v1/admin/nodes"} {
 		unauthResp, err := http.Get(stack.httpSrv.URL + path)
 		if err != nil {
 			t.Fatal(err)
@@ -415,9 +466,6 @@ func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
 		_ = authResp.Body.Close()
 		if authResp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s with token status=%d body=%s, want 200", path, authResp.StatusCode, authBody)
-		}
-		if path == "/api/v1/admin/nats-config" && !strings.Contains(string(authBody), "resolver: MEMORY") {
-			t.Fatalf("admin nats-config missing resolver config: %s", authBody)
 		}
 	}
 }

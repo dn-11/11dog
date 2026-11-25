@@ -47,6 +47,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "dn11dog.secretName" . }}
                   key: admin-token
+            - name: DOG_NATS_ACCOUNT_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dn11dog.natsAuthSecretName" . }}
+                  key: account-seed
             {{- if .Values.db.existingSecret }}
             - name: DOG_DB_DSN
               valueFrom:

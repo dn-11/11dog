@@ -7,7 +7,6 @@ metadata:
 data:
   server.yaml: |
     http_listen_addr: ":8080"
-    public_ws_addr: {{ .Values.publicWSAddr | quote }}
     agent_bin_dir: "/opt/11dog/downloads"
     agent_download_base_url: {{ .Values.agentDownloadBaseURL | quote }}
     site_title: {{ .Values.siteTitle | quote }}
@@ -19,12 +18,14 @@ data:
       {{- else }}
       dsn: {{ .Values.db.dsn | quote }}
       {{- end }}
-    mq:
-      driver: {{ .Values.mq.driver | quote }}
-      nats_url: {{ include "dn11dog.natsUrl" . | quote }}
-      stream_name: {{ .Values.mq.streamName | quote }}
-      max_queue_per_node: {{ .Values.mq.maxQueuePerNode }}
-      task_ttl_sec: {{ .Values.mq.taskTTLSec }}
+    nats:
+      url: {{ include "dn11dog.natsUrl" . | quote }}
+      public_url: {{ .Values.nats.publicUrl | quote }}
+      stream_name: {{ .Values.nats.streamName | quote }}
+      max_queue_per_node: {{ .Values.nats.maxQueuePerNode }}
+      task_ttl_sec: {{ .Values.nats.taskTTLSec }}
+      tls_ca_file: {{ .Values.nats.tlsCAFile | quote }}
+      tls_insecure_skip_verify: {{ .Values.nats.tlsInsecureSkipVerify }}
     limits:
       rate_limit_rpm: {{ .Values.limits.rateLimitRPM }}
       rate_limit_burst: {{ .Values.limits.rateLimitBurst }}
