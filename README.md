@@ -144,7 +144,7 @@ curl -fsSL "https://11dog.dn11.example/scripts/uninstall.sh" | sudo bash
 
 ### 方式二：Docker Compose（Host 网络）
 
-如需通过容器运行 Agent，使用 `network_mode: host` 共享宿主机网络栈与 DN11 路由表（并授予 `CAP_NET_RAW` 以支持原生 ICMP Ping / Traceroute）。
+如需通过容器运行 Agent，使用 `network_mode: host` 共享宿主机网络栈与 DN11 路由表，并只读挂载 `/etc/resolv.conf` 与 `/etc/hosts` 使 DNS 解析完全遵循宿主机配置（同时授予 `CAP_NET_RAW` 以支持原生 ICMP Ping / Traceroute）。
 
 1. 从管理后台 **「部署脚本」** 弹窗复制节点专属 `.creds` 并保存为同目录下的 `agent.creds`；
 2. 参考 [deploy/docker-compose.agent.yml](deploy/docker-compose.agent.yml) 创建 `docker-compose.yml`：
@@ -166,6 +166,8 @@ services:
       DOG_MAX_CONCURRENCY: "8"
     volumes:
       - ./agent.creds:/etc/11dog/agent.creds:ro
+      - /etc/resolv.conf:/etc/resolv.conf:ro
+      - /etc/hosts:/etc/hosts:ro
 ```
 
 启动与运维：

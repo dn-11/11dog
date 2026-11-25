@@ -139,7 +139,9 @@ const dockerComposeAgentYaml = computed(() => {
       DOG_NATS_CREDS_FILE: "/etc/11dog/agent.creds"
       DOG_MAX_CONCURRENCY: "${maxConc}"
     volumes:
-      - ./agent.creds:/etc/11dog/agent.creds:ro`
+      - ./agent.creds:/etc/11dog/agent.creds:ro
+      - /etc/resolv.conf:/etc/resolv.conf:ro
+      - /etc/hosts:/etc/hosts:ro`
 })
 
 async function loadData(token: string): Promise<boolean> {

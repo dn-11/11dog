@@ -16,5 +16,7 @@ FROM alpine:3.21
 LABEL org.opencontainers.image.source="https://github.com/dn-11/11dog"
 LABEL org.opencontainers.image.description="11Dog - DN11 Network Diagnostic Edge Probe Agent"
 RUN apk add --no-cache ca-certificates tzdata && mkdir -p /etc/11dog /opt/11dog
+COPY deploy/certs/dn11-roots.crt /usr/local/share/ca-certificates/dn11-roots.crt
+RUN update-ca-certificates
 COPY --from=go-builder /out/11dog-agent /usr/local/bin/11dog-agent
 ENTRYPOINT ["/usr/local/bin/11dog-agent"]
