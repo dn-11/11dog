@@ -156,64 +156,6 @@ func (b *Broker) EnqueueTask(ctx context.Context, nodeID uuid.UUID, task *mq.Que
 	return nil
 }
 
-// ConsumeNodeQueue pulls tasks from nodeID's durable JetStream consumer.
-func (b *Broker) ConsumeNodeQueue(ctx context.Context, nodeID uuid.UUID, maxInFlight int, handler func(context.Context, *mq.QueuedSubtask) error) error {
-	if maxInFlight <= 0 {
-		maxInFlight = 8
-	}
-	consumer, err := b.js.CreateOrUpdateConsumer(ctx, b.streamName, jetstream.ConsumerConfig{
-		Durable:       "node_" + nodeID.String(),
-		FilterSubject: nodeSubject(nodeID),
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       b.taskTTL + 15*time.Second,
-		MaxAckPending: maxInFlight,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
-	})
-	if err != nil {
-		return fmt.Errorf("create consumer for node %q: %w", nodeID, err)
-	}
-
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		b.mu.RLock()
-		closed := b.closed
-		b.mu.RUnlock()
-		if closed {
-			return mq.ErrClosed
-		}
-
-		msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			continue
-		}
-
-		for msg := range msgs.Messages() {
-			var subtask mq.QueuedSubtask
-			if err := json.Unmarshal(msg.Data(), &subtask); err != nil {
-				_ = msg.Term()
-				continue
-			}
-			if err := handler(ctx, &subtask); err != nil {
-				if subtask.Deadline.IsZero() || time.Now().Before(subtask.Deadline) {
-					_ = msg.NakWithDelay(500 * time.Millisecond)
-				} else {
-					_ = msg.Ack()
-				}
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				continue
-			}
-			_ = msg.Ack()
-		}
-	}
-}
-
 // PublishResult publishes task events over Core NATS so all server replicas receive them.
 func (b *Broker) PublishResult(ctx context.Context, event *model.TaskEvent) error {
 	if err := ctx.Err(); err != nil {

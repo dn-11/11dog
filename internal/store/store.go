@@ -50,7 +50,6 @@ type NodeStore interface {
 	GetNodeByToken(ctx context.Context, token string) (*NodeRecord, error)
 	ListNodes(ctx context.Context) ([]*NodeRecord, error)
 	UpdateNode(ctx context.Context, id uuid.UUID, patch NodePatch) (*NodeRecord, error)
-	RotateToken(ctx context.Context, id uuid.UUID) (*NodeRecord, error)
 	UpdateCreds(ctx context.Context, id uuid.UUID, creds string) (*NodeRecord, error)
 	DeleteNode(ctx context.Context, id uuid.UUID) error
 	GetSetting(ctx context.Context, key string) (string, int64, error)

@@ -64,13 +64,13 @@ func TestSQLiteNodeStoreCRUDAndTokenRotation(t *testing.T) {
 		t.Fatalf("unexpected updated node: %+v", updated)
 	}
 
-	// Rotate token invalidates old token
-	rotated, err := st.RotateToken(ctx, created.ID)
+	// UpdateCreds rotates install token and updates .creds bundle
+	rotated, err := st.UpdateCreds(ctx, created.ID, "new-nats-creds-bundle")
 	if err != nil {
-		t.Fatalf("RotateToken failed: %v", err)
+		t.Fatalf("UpdateCreds failed: %v", err)
 	}
-	if rotated.Token == created.Token {
-		t.Fatal("expected rotated token to differ from original")
+	if rotated.Token == created.Token || rotated.Creds != "new-nats-creds-bundle" {
+		t.Fatalf("unexpected rotated record: %+v", rotated)
 	}
 	if _, err := st.GetNodeByToken(ctx, created.Token); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected old token to return ErrNotFound, got %v", err)

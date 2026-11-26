@@ -95,8 +95,8 @@ export async function updateAdminNode(
   return (await resp.json()) as AdminNodeInfo
 }
 
-export async function rotateAdminNodeToken(adminToken: string, nodeID: string): Promise<AdminNodeInfo> {
-  const resp = await fetch(`/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/rotate-token`, {
+export async function rotateAdminNodeCreds(adminToken: string, nodeID: string): Promise<AdminNodeInfo> {
+  const resp = await fetch(`/api/v1/admin/nodes/${encodeURIComponent(nodeID)}/rotate-creds`, {
     method: 'POST',
     headers: { 'X-Admin-Token': adminToken }
   })

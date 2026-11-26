@@ -306,26 +306,6 @@ func (s *SQLStore) UpdateNode(ctx context.Context, id uuid.UUID, patch NodePatch
 	return cur, nil
 }
 
-// RotateToken replaces a node's install-script token with a fresh random token.
-func (s *SQLStore) RotateToken(ctx context.Context, id uuid.UUID) (*NodeRecord, error) {
-	cur, err := s.GetNode(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	cur.Token = GenerateNodeToken()
-	cur.UpdatedAtMs = time.Now().UnixMilli()
-
-	q := s.rebind(`UPDATE nodes SET token = ?, updated_at_ms = ? WHERE id = ?`)
-	res, err := s.db.ExecContext(ctx, q, cur.Token, cur.UpdatedAtMs, id.String())
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, ErrNotFound
-	}
-	return cur, nil
-}
-
 // UpdateCreds stores a newly signed NATS .creds bundle and rotates the install token.
 func (s *SQLStore) UpdateCreds(ctx context.Context, id uuid.UUID, creds string) (*NodeRecord, error) {
 	cur, err := s.GetNode(ctx, id)

@@ -403,8 +403,7 @@ func (h *Hub) DisconnectNode(nodeID uuid.UUID) bool {
 		return false
 	}
 	payload, _ := json.Marshal(model.ReconnectCommand{
-		Reason:            "reconnect requested by admin",
-		ReconnectAfterSec: 2,
+		Reason: "reconnect requested by admin",
 	})
 	return h.broker.Conn().Publish("ctrl.node."+nodeID.String()+".reconnect", payload) == nil
 }
@@ -565,7 +564,6 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 		if hb, ok := h.getNodeHeartbeat(ctx, rec.ID); ok {
 			liveHB = hb
 			info.Status = "online"
-			info.IPv4 = hb.IPv4
 			if len(hb.Capabilities) > 0 {
 				info.Capabilities = hb.Capabilities
 			}
@@ -573,14 +571,11 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 				info.MaxConcurrency = hb.MaxConcurrency
 			}
 			info.ActiveTasks = hb.ActiveTasks
-			info.CPUPercent = hb.CPUPercent
-			info.MemPercent = hb.MemPercent
 			info.Version = hb.Version
 			info.OS = hb.OS
 			info.Arch = hb.Arch
 			info.LastSeenUnixMs = hb.TimestampUnixMs
 			info.ConnectedAtMs = hb.ConnectedAtMs
-			info.Labels = hb.Labels
 		}
 		info.UpdateStatus = h.getNodeUpdateStatus(ctx, rec.ID, liveHB)
 		info.QueueDepth = h.broker.QueueDepth(rec.ID)

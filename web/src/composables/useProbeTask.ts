@@ -3,14 +3,6 @@ import { cancelTask, createTask, subscribeTaskStream } from '@/api/client'
 import type { CreateTaskRequest, DN11Match, NodeTaskResult, ProbeType, TaskSnapshot, TaskStatus } from '@/types/api'
 import { extractPrimaryLatencyMs } from '@/utils/format'
 
-export interface HistorySample {
-  timestamp: number
-  avgMs: number | null
-  minMs: number | null
-  maxMs: number | null
-  lossPct: number
-}
-
 export interface ContinuousTickPoint {
   round: number
   ts: number
@@ -82,7 +74,6 @@ export function useProbeTask() {
   const running = ref(false)
   const continuous = ref(false)
   const errorMsg = ref('')
-  const continuousSamples = ref<HistorySample[]>([])
 
   let closeStream: (() => void) | null = null
   let nextRunTimer: number | undefined
@@ -559,7 +550,6 @@ export function useProbeTask() {
     running,
     continuous,
     errorMsg,
-    continuousSamples,
     startSingle,
     startContinuous,
     pauseContinuous,

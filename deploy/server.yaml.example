@@ -33,7 +33,6 @@ limits:
   max_target_len: 512
   default_timeout_ms: 15000
   max_timeout_ms: 60000
-  per_node_dispatch_rps: 10
   task_history_ttl_sec: 1800
   allowed_cidrs: []
   denied_cidrs: []
@@ -48,8 +47,4 @@ dn11_prefixes:
   - cidr: "172.16.0.0/16"
     asn: 4211110000
     owner: "DN11 Backbone"
-    region: "DN11"
-  - cidr: "fd00::/48"
-    asn: 4211110000
-    owner: "DN11 IPv6 Backbone"
     region: "DN11"

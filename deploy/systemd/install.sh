@@ -36,7 +36,7 @@ chmod 0750 "${CONFIG_DIR}"
 
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   install -m 0640 -o root -g 11dog "${SCRIPT_DIR}/agent.yaml.example" "${CONFIG_FILE}"
-  echo "已生成默认配置文件: ${CONFIG_FILE}，请先修改 server_addr / token / node_id 后重启服务"
+  echo "已生成默认配置文件: ${CONFIG_FILE}，请先修改 nats_addr 并放置 NATS .creds 凭据文件 (/etc/11dog/agent.creds) 后重启服务"
 else
   echo "保留现有配置文件: ${CONFIG_FILE}"
 fi

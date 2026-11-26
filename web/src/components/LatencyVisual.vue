@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { HistorySample } from '@/composables/useProbeTask'
 import type { NodeTaskResult } from '@/types/api'
 import { extractPrimaryLatencyMs, formatMs, latencyColor } from '@/utils/format'
 
 const props = defineProps<{
   results: NodeTaskResult[]
-  continuousSamples?: HistorySample[]
-  showContinuous?: boolean
 }>()
 
 interface RegionSummary {
@@ -74,22 +71,6 @@ const buckets = computed(() => {
     pct: Math.round((b.count / max) * 100)
   }))
 })
-
-const sparklinePath = computed(() => {
-  const samples = props.continuousSamples ?? []
-  const valid = samples.filter((s) => s.avgMs !== null)
-  if (valid.length < 2) return ''
-  const w = 520
-  const h = 110
-  const maxMs = Math.max(10, ...valid.map((s) => s.avgMs ?? 0))
-  return samples
-    .map((s, idx) => {
-      const x = (idx / Math.max(1, samples.length - 1)) * (w - 20) + 10
-      const y = s.avgMs !== null ? h - 14 - (s.avgMs / maxMs) * (h - 26) : h - 14
-      return `${idx === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .join(' ')
-})
 </script>
 
 <template>
@@ -126,22 +107,10 @@ const sparklinePath = computed(() => {
 
     <div class="card">
       <div class="card-header">
-        <span>{{ showContinuous && (continuousSamples?.length ?? 0) > 1 ? '持续测试延迟曲线' : '延迟分段分布' }}</span>
+        <span>延迟分段分布</span>
       </div>
       <div class="card-body">
-        <div v-if="showContinuous && (continuousSamples?.length ?? 0) > 1" class="spark-wrap">
-          <svg viewBox="0 0 520 110" class="spark-svg">
-            <line x1="10" y1="96" x2="510" y2="96" stroke="#e2e8f0" stroke-width="1" />
-            <line x1="10" y1="53" x2="510" y2="53" stroke="#f1f5f9" stroke-dasharray="3 3" stroke-width="1" />
-            <path :d="sparklinePath" fill="none" stroke="#1677ff" stroke-width="2.5" stroke-linejoin="round" />
-          </svg>
-          <div class="spark-caption mono">
-            最近 {{ continuousSamples?.length }} 轮均值趋势 (最新:
-            {{ formatMs(continuousSamples?.[continuousSamples.length - 1]?.avgMs) }})
-          </div>
-        </div>
-
-        <div v-else class="buckets-list">
+        <div class="buckets-list">
           <div v-for="b in buckets" :key="b.label" class="bucket-row">
             <span class="bucket-label">{{ b.label }}</span>
             <div class="bucket-track">
@@ -250,26 +219,6 @@ const sparklinePath = computed(() => {
   text-align: right;
   font-weight: 600;
   color: var(--text-primary);
-}
-
-.spark-wrap {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.spark-svg {
-  width: 100%;
-  height: 110px;
-  background: #f8fafc;
-  border-radius: 6px;
-  border: 1px solid var(--border-color);
-}
-
-.spark-caption {
-  font-size: 12px;
-  color: var(--text-secondary);
-  text-align: right;
 }
 
 @media (max-width: 960px) {

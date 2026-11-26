@@ -58,10 +58,9 @@ type LimitsConfig struct {
 	RateLimitRPM       int      `yaml:"rate_limit_rpm"`
 	RateLimitBurst     int      `yaml:"rate_limit_burst"`
 	MaxTargetLen       int      `yaml:"max_target_len"`
-	DefaultTimeoutMs   uint32   `yaml:"default_timeout_ms"`
-	MaxTimeoutMs       uint32   `yaml:"max_timeout_ms"`
-	PerNodeDispatchRPS float64  `yaml:"per_node_dispatch_rps"`
-	AllowedCIDRs       []string `yaml:"allowed_cidrs"`
+	DefaultTimeoutMs  uint32   `yaml:"default_timeout_ms"`
+	MaxTimeoutMs      uint32   `yaml:"max_timeout_ms"`
+	AllowedCIDRs      []string `yaml:"allowed_cidrs"`
 	DeniedCIDRs        []string `yaml:"denied_cidrs"`
 	TaskHistoryTTLSec  int      `yaml:"task_history_ttl_sec"`
 }
@@ -87,10 +86,9 @@ func DefaultServerConfig() *ServerConfig {
 			RateLimitRPM:       180,
 			RateLimitBurst:     30,
 			MaxTargetLen:       512,
-			DefaultTimeoutMs:   15000,
-			MaxTimeoutMs:       60000,
-			PerNodeDispatchRPS: 10,
-			TaskHistoryTTLSec:  1800,
+			DefaultTimeoutMs:  15000,
+			MaxTimeoutMs:      60000,
+			TaskHistoryTTLSec: 1800,
 		},
 		DN11Registry: DN11RegistryConfig{
 			Enabled:            true,

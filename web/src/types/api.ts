@@ -48,13 +48,10 @@ export interface AdminNodeInfo {
   region: string
   group: string
   asn: number
-  ipv4?: string
   capabilities: ProbeType[]
   max_concurrency: number
   active_tasks: number
   queue_depth: number
-  cpu_percent: number
-  mem_percent: number
   version: string
   os?: string
   arch?: string
@@ -68,7 +65,6 @@ export interface AdminNodeInfo {
   updated_at_ms?: number
   last_seen_unix_ms: number
   connected_at_unix_ms?: number
-  labels?: Record<string, string>
 }
 
 export interface AdminTriggerUpdateRequest {
@@ -162,7 +158,6 @@ export interface HTTPParams {
 export interface TracerouteParams {
   max_hops?: number
   queries_per_hop?: number
-  protocol?: string
 }
 
 export interface DNSParams {

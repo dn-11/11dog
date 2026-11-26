@@ -72,13 +72,10 @@ type NodeInfo struct {
 	Region         string            `json:"region"`
 	Group          string            `json:"group"`
 	ASN            uint32            `json:"asn"`
-	IPv4           string            `json:"ipv4,omitempty"`
 	Capabilities   []ProbeType       `json:"capabilities"`
 	MaxConcurrency uint32            `json:"max_concurrency"`
 	ActiveTasks    uint32            `json:"active_tasks"`
 	QueueDepth     int               `json:"queue_depth"`
-	CPUPercent     float64           `json:"cpu_percent"`
-	MemPercent     float64           `json:"mem_percent"`
 	Version        string            `json:"version"`
 	OS             string            `json:"os,omitempty"`
 	Arch           string            `json:"arch,omitempty"`
@@ -92,7 +89,6 @@ type NodeInfo struct {
 	UpdatedAtMs    int64             `json:"updated_at_ms,omitempty"`
 	LastSeenUnixMs int64             `json:"last_seen_unix_ms"`
 	ConnectedAtMs  int64             `json:"connected_at_unix_ms,omitempty"`
-	Labels         map[string]string `json:"labels,omitempty"`
 }
 
 // PublicNodeInfo exposes only safe user-facing probe location attributes.
@@ -177,18 +173,14 @@ type AdminOverview struct {
 // AgentHeartbeat is published periodically by edge agents over Core NATS (agent.hb.<nodeID>).
 type AgentHeartbeat struct {
 	NodeID          uuid.UUID         `json:"node_id"`
-	IPv4            string            `json:"ipv4,omitempty"`
 	Capabilities    []ProbeType       `json:"capabilities,omitempty"`
 	MaxConcurrency  uint32            `json:"max_concurrency"`
 	ActiveTasks     uint32            `json:"active_tasks"`
-	CPUPercent      float64           `json:"cpu_percent"`
-	MemPercent      float64           `json:"mem_percent"`
 	Version         string            `json:"version"`
 	OS              string            `json:"os,omitempty"`
 	Arch            string            `json:"arch,omitempty"`
-	TimestampUnixMs int64             `json:"timestamp_unix_ms"`
-	ConnectedAtMs   int64             `json:"connected_at_unix_ms,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
+	TimestampUnixMs int64       `json:"timestamp_unix_ms"`
+	ConnectedAtMs   int64       `json:"connected_at_unix_ms,omitempty"`
 }
 
 // CancelTaskCommand is published to ctrl.node.<nodeID>.cancel.
@@ -208,8 +200,7 @@ type AgentUpdateCommand struct {
 
 // ReconnectCommand is published to ctrl.node.<nodeID>.reconnect.
 type ReconnectCommand struct {
-	Reason            string `json:"reason,omitempty"`
-	ReconnectAfterSec uint32 `json:"reconnect_after_sec,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // CreateTaskRequest is the HTTP payload to dispatch a network diagnostic task.
@@ -255,7 +246,6 @@ type HTTPParams struct {
 type TracerouteParams struct {
 	MaxHops       uint32 `json:"max_hops,omitempty"`
 	QueriesPerHop uint32 `json:"queries_per_hop,omitempty"`
-	Protocol      string `json:"protocol,omitempty"` // icmp, udp
 }
 
 type DNSParams struct {

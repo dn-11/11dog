@@ -34,9 +34,6 @@ type Broker interface {
 	// EnqueueTask pushes a subtask into nodeID's bounded queue. Returns ErrQueueFull on overflow.
 	EnqueueTask(ctx context.Context, nodeID uuid.UUID, task *QueuedSubtask) error
 
-	// ConsumeNodeQueue consumes tasks destined for nodeID until ctx is cancelled or the broker closes.
-	ConsumeNodeQueue(ctx context.Context, nodeID uuid.UUID, maxInFlight int, handler func(context.Context, *QueuedSubtask) error) error
-
 	// PublishResult broadcasts a task event (progress/result/done) to all subscribers of taskID.
 	PublishResult(ctx context.Context, event *model.TaskEvent) error
 

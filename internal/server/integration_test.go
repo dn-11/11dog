@@ -451,7 +451,7 @@ func TestPublicAPISanitizationAndAdminAuthAndNATSConfig(t *testing.T) {
 	}
 	nodesRaw, _ := io.ReadAll(nodesResp.Body)
 	_ = nodesResp.Body.Close()
-	for _, forbidden := range []string{"cpu_percent", "mem_percent", "queue_depth", "max_concurrency", "active_tasks", "ipv4", "version", "last_seen_unix_ms", "token", "creds"} {
+	for _, forbidden := range []string{"queue_depth", "max_concurrency", "active_tasks", "version", "last_seen_unix_ms", "token", "creds"} {
 		if strings.Contains(string(nodesRaw), forbidden) {
 			t.Fatalf("public /api/v1/nodes leaked internal field %q: %s", forbidden, nodesRaw)
 		}

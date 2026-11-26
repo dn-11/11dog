@@ -40,8 +40,7 @@ function handleStart() {
     params: {
       traceroute: {
         max_hops: maxHops.value,
-        queries_per_hop: queriesPerHop.value,
-        protocol: 'icmp'
+        queries_per_hop: queriesPerHop.value
       }
     }
   })

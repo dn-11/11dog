@@ -7,7 +7,7 @@ import {
   fetchAdminNodes,
   fetchAdminOverview,
   fetchAdminTargetPolicy,
-  rotateAdminNodeToken,
+  rotateAdminNodeCreds,
   triggerAdminBatchUpdate,
   triggerAdminNodeUpdate,
   updateAdminNode,
@@ -115,7 +115,7 @@ const filteredNodes = computed(() => {
     if (nodeStatusFilter.value === 'offline' && n.status === 'online') return false
     if (nodeStatusFilter.value === 'disabled' && n.enabled) return false
     if (kw) {
-      const hay = `${n.name} ${n.id} ${n.region} ${n.group} ${n.ipv4 ?? ''} AS${n.asn} ${n.notes ?? ''}`.toLowerCase()
+      const hay = `${n.name} ${n.id} ${n.region} ${n.group} AS${n.asn} ${n.notes ?? ''}`.toLowerCase()
       if (!hay.includes(kw)) return false
     }
     return true
@@ -336,13 +336,13 @@ function openDeployModal(n: AdminNodeInfo) {
   }
 }
 
-async function handleRotateToken(n: AdminNodeInfo) {
+async function handleRotateCreds(n: AdminNodeInfo) {
   if (!window.confirm(`确定要为节点「${n.name} (${n.id})」重新签发 NATS .creds 凭据吗？`)) {
     return
   }
   clearBanners()
   try {
-    const updated = await rotateAdminNodeToken(adminToken.value, n.id)
+    const updated = await rotateAdminNodeCreds(adminToken.value, n.id)
     actionMsg.value = `节点「${n.name}」已签发新的 NATS .creds 凭据`
     await loadData(adminToken.value)
     openDeployModal(updated)
@@ -870,7 +870,7 @@ onUnmounted(() => {
                 v-model="nodeKeyword"
                 type="text"
                 class="search-input"
-                placeholder="搜索节点名称 / UUID / 区域 / IPv4 / ASN"
+                placeholder="搜索节点名称 / UUID / 区域 / 网络组 / ASN"
               />
             </div>
 
@@ -881,9 +881,8 @@ onUnmounted(() => {
                     <th>状态</th>
                     <th>节点名称 / UUID</th>
                     <th>区域 / 网络组 / ASN</th>
-                    <th>接入 IPv4</th>
                     <th>并发 / 队列</th>
-                    <th>资源 / 心跳</th>
+                    <th>版本 / 心跳</th>
                     <th>管理操作</th>
                   </tr>
                 </thead>
@@ -910,9 +909,6 @@ onUnmounted(() => {
                         {{ n.asn ? `AS${n.asn}` : '-' }}
                       </div>
                     </td>
-                    <td class="mono text-sm">
-                      {{ n.ipv4 || '-' }}
-                    </td>
                     <td>
                       <div class="mono text-sm">
                         并发 {{ n.active_tasks }}/{{ n.max_concurrency }} · 队列 {{ n.queue_depth }}/{{ overview?.max_queue_per_node ?? 20 }}
@@ -928,9 +924,9 @@ onUnmounted(() => {
                       </div>
                     </td>
                     <td class="mono text-sm">
-                      <div>CPU {{ n.cpu_percent.toFixed(1) }}% · 内存 {{ n.mem_percent.toFixed(1) }}%</div>
+                      <div>{{ n.version || '-' }}</div>
                       <div class="text-muted">
-                        {{ n.version || '-' }} · {{ formatTime(n.last_seen_unix_ms) }}
+                        {{ formatTime(n.last_seen_unix_ms) }}
                       </div>
                     </td>
                     <td>
@@ -949,7 +945,7 @@ onUnmounted(() => {
                         >
                           重连
                         </button>
-                        <button type="button" class="btn btn-outline btn-sm" @click="handleRotateToken(n)">
+                        <button type="button" class="btn btn-outline btn-sm" @click="handleRotateCreds(n)">
                           重签Creds
                         </button>
                         <button type="button" class="btn btn-danger btn-sm" @click="handleDelete(n)">
@@ -959,7 +955,7 @@ onUnmounted(() => {
                     </td>
                   </tr>
                   <tr v-if="filteredNodes.length === 0">
-                    <td colspan="7" class="empty-nodes">
+                    <td colspan="6" class="empty-nodes">
                       {{ nodes.length === 0 ? '暂无节点记录，请点击右上角「+ 新增节点」开始部署。' : '没有符合筛选条件的节点。' }}
                     </td>
                   </tr>

@@ -81,7 +81,6 @@ limits:
   maxTargetLen: 512
   defaultTimeoutMs: 15000
   maxTimeoutMs: 60000
-  perNodeDispatchRPS: 10
   taskHistoryTTLSec: 1800
   allowedCIDRs: []
   deniedCIDRs: []
@@ -95,10 +94,6 @@ dn11Prefixes:
   - cidr: "172.16.0.0/16"
     asn: 4211110000
     owner: "DN11 Backbone"
-    region: "DN11"
-  - cidr: "fd00::/48"
-    asn: 4211110000
-    owner: "DN11 IPv6 Backbone"
     region: "DN11"
 
 service:

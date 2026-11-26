@@ -238,8 +238,10 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	defer func() { _ = updateSub.Unsubscribe() }()
 
-	reconnectSub, err := nc.Subscribe("ctrl.node."+idStr+".reconnect", func(_ *natsgo.Msg) {
-		c.logger.Info("received reconnect command from control plane", "node_id", nodeID)
+	reconnectSub, err := nc.Subscribe("ctrl.node."+idStr+".reconnect", func(msg *natsgo.Msg) {
+		var cmd model.ReconnectCommand
+		_ = json.Unmarshal(msg.Data, &cmd)
+		c.logger.Info("received reconnect command from control plane", "node_id", nodeID, "reason", cmd.Reason)
 		_ = nc.ForceReconnect()
 	})
 	if err != nil {
@@ -249,14 +251,11 @@ func (c *Client) Run(ctx context.Context) error {
 
 	// Heartbeat loop (publish immediately on startup, then every 10s).
 	publishHB := func() {
-		cpuPct, memPct := readSysMetrics()
 		hb := model.AgentHeartbeat{
 			NodeID:          nodeID,
 			Capabilities:    builtinCapabilities,
 			MaxConcurrency:  uint32(cap(c.sem)),
 			ActiveTasks:     uint32(c.activeTasks.Load()),
-			CPUPercent:      cpuPct,
-			MemPercent:      memPct,
 			Version:         Version,
 			OS:              runtime.GOOS,
 			Arch:            runtime.GOARCH,

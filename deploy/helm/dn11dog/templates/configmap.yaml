@@ -32,7 +32,6 @@ data:
       max_target_len: {{ .Values.limits.maxTargetLen }}
       default_timeout_ms: {{ .Values.limits.defaultTimeoutMs }}
       max_timeout_ms: {{ .Values.limits.maxTimeoutMs }}
-      per_node_dispatch_rps: {{ .Values.limits.perNodeDispatchRPS }}
       task_history_ttl_sec: {{ .Values.limits.taskHistoryTTLSec }}
       allowed_cidrs:
         {{- toYaml .Values.limits.allowedCIDRs | nindent 8 }}

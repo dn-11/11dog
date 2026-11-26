@@ -176,7 +176,7 @@ func NewHTTPHandler(cfg *config.ServerConfig, hub *Hub, orch *Orchestrator, node
 		writeJSON(w, http.StatusOK, nodeRecordToInfo(rec))
 	})
 
-	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rotate-token", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v1/admin/nodes/{id}/rotate-creds", func(w http.ResponseWriter, r *http.Request) {
 		if !requireAdmin(cfg, w, r) {
 			return
 		}
