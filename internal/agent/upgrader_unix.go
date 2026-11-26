@@ -34,6 +34,7 @@ func newProcessUpgrader(pidFile string) (*processUpgrader, error) {
 }
 
 func (p *processUpgrader) Ready() error          { return p.upg.Ready() }
+func (p *processUpgrader) HasParent() bool       { return p.upg.HasParent() }
 func (p *processUpgrader) Upgrade() error        { return p.upg.Upgrade() }
 func (p *processUpgrader) Exit() <-chan struct{} { return p.upg.Exit() }
 func (p *processUpgrader) Stop()                 { p.upg.Stop() }

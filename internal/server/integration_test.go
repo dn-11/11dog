@@ -607,6 +607,10 @@ func TestAdminTargetPolicyEnforcement(t *testing.T) {
 func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 	stack := startTestStack(t, 20)
 
+	prevVer := agent.Version
+	agent.Version = "1.0.0"
+	defer func() { agent.Version = prevVer }()
+
 	binDir := t.TempDir()
 	stack.cfg.AgentBinDir = binDir
 	hostedFilename := server.AgentBinaryFilename(runtime.GOOS, runtime.GOARCH)
@@ -624,7 +628,40 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recUpd, client := registerDBNodeAndStartAgent(t, stack, "自更新测试节点", "香港", "DN11-BGP", 4211110777, 4)
+	id := uuid.New()
+	creds, err := stack.authMgr.IssueAgentCreds(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recUpd, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
+		ID:             id,
+		Name:           "自更新测试节点",
+		Region:         "香港",
+		Group:          "DN11-BGP",
+		ASN:            4211110777,
+		MaxConcurrency: 4,
+		Creds:          creds,
+		Enabled:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentCfg := config.DefaultAgentConfig()
+	agentCfg.NATSAddr = stack.natsWSURL
+	agentCfg.Creds = creds
+	agentCfg.CredsFile = ""
+	agentCfg.PIDFile = ""
+	agentCfg.MaxConcurrency = 4
+
+	oldCtx, stopOldAgent := context.WithCancel(context.Background())
+	defer stopOldAgent()
+
+	agentLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if testing.Verbose() {
+		agentLogger = slog.Default()
+	}
+	client := agent.NewClient(agentCfg, agentLogger)
 
 	var restarted atomic.Bool
 	client.SetUpdateHooks(
@@ -634,6 +671,9 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 			return nil
 		},
 	)
+	go func() {
+		_ = client.Run(oldCtx)
+	}()
 
 	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
 
@@ -673,10 +713,159 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 		t.Fatalf("replaced binary content = %q, want %q", string(replacedBytes), string(newBinaryPayload))
 	}
 
-	// Verify admin node list reflects the reported update status from NATS KV.
+	fetchAdminNodeList := func() []model.NodeInfo {
+		nodesReq, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/api/v1/admin/nodes", nil)
+		nodesReq.Header.Set("X-Admin-Token", "test-admin-secret")
+		nodesResp, err := http.DefaultClient.Do(nodesReq)
+		if err != nil {
+			return nil
+		}
+		var nodesBody struct {
+			Nodes []model.NodeInfo `json:"nodes"`
+		}
+		_ = json.NewDecoder(nodesResp.Body).Decode(&nodesBody)
+		_ = nodesResp.Body.Close()
+		return nodesBody.Nodes
+	}
+
+	// 1. Before the new agent process comes online, status stays "restarting".
 	deadlineStatus := time.Now().Add(3 * time.Second)
 	var lastNodes []model.NodeInfo
+	seenRestarting := false
 	for time.Now().Before(deadlineStatus) {
+		lastNodes = fetchAdminNodeList()
+		if len(lastNodes) == 1 && lastNodes[0].UpdateStatus != nil && lastNodes[0].UpdateStatus.State == "restarting" {
+			seenRestarting = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !seenRestarting {
+		t.Fatalf("expected node update_status=restarting in NATS KV before new process starts, got %+v", lastNodes)
+	}
+
+	// 2. Simulate new agent process starting up with upgraded version 2.0.0;
+	// Hub must automatically close the state loop from "restarting" to "up_to_date".
+	stopOldAgent()
+	agent.Version = "2.0.0"
+
+	newCtx, stopNewAgent := context.WithCancel(context.Background())
+	defer stopNewAgent()
+	newClient := agent.NewClient(agentCfg, agentLogger)
+	go func() {
+		_ = newClient.Run(newCtx)
+	}()
+
+	deadlineConverge := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadlineConverge) {
+		lastNodes = fetchAdminNodeList()
+		if len(lastNodes) == 1 &&
+			lastNodes[0].Version == "2.0.0" &&
+			lastNodes[0].UpdateStatus != nil &&
+			lastNodes[0].UpdateStatus.State == "up_to_date" {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("expected node update_status to converge to up_to_date after new process connects, got %+v", lastNodes)
+}
+
+func TestAgentSelfUpdateVersionMismatchOnRestart(t *testing.T) {
+	stack := startTestStack(t, 20)
+
+	prevVer := agent.Version
+	agent.Version = "1.0.0"
+	defer func() { agent.Version = prevVer }()
+
+	binDir := t.TempDir()
+	stack.cfg.AgentBinDir = binDir
+	hostedFilename := server.AgentBinaryFilename(runtime.GOOS, runtime.GOARCH)
+	if err := os.WriteFile(filepath.Join(binDir, hostedFilename), []byte("rollback-binary-v1.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeExePath := filepath.Join(t.TempDir(), "11dog-agent")
+	if runtime.GOOS == "windows" {
+		fakeExePath += ".exe"
+	}
+	if err := os.WriteFile(fakeExePath, []byte("old-binary-v1.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	id := uuid.New()
+	creds, err := stack.authMgr.IssueAgentCreds(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recUpd, err := stack.store.CreateNode(context.Background(), &store.NodeRecord{
+		ID:             id,
+		Name:           "回滚检测节点",
+		Region:         "东京",
+		Group:          "DN11-IX",
+		ASN:            4211110778,
+		MaxConcurrency: 4,
+		Creds:          creds,
+		Enabled:        true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	agentCfg := config.DefaultAgentConfig()
+	agentCfg.NATSAddr = stack.natsWSURL
+	agentCfg.Creds = creds
+	agentCfg.MaxConcurrency = 4
+
+	oldCtx, stopOld := context.WithCancel(context.Background())
+	defer stopOld()
+	agentLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	oldClient := agent.NewClient(agentCfg, agentLogger)
+
+	var restarted atomic.Bool
+	oldClient.SetUpdateHooks(
+		func() (string, error) { return fakeExePath, nil },
+		func(_ string) error {
+			restarted.Store(true)
+			return nil
+		},
+	)
+	go func() { _ = oldClient.Run(oldCtx) }()
+
+	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
+
+	updReq, _ := http.NewRequest(
+		http.MethodPost,
+		stack.httpSrv.URL+"/api/v1/admin/nodes/"+recUpd.ID.String()+"/update",
+		strings.NewReader(`{"version":"2.0.0","force":true}`),
+	)
+	updReq.Header.Set("X-Admin-Token", "test-admin-secret")
+	updReq.Header.Set("Content-Type", "application/json")
+	updResp, err := http.DefaultClient.Do(updReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = updResp.Body.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !restarted.Load() {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !restarted.Load() {
+		t.Fatal("timed out waiting for restart hook")
+	}
+
+	// Simulate container/process restarting back into old version 1.0.0 instead of target 2.0.0.
+	stopOld()
+	agent.Version = "1.0.0"
+
+	newCtx, stopNew := context.WithCancel(context.Background())
+	defer stopNew()
+	newClient := agent.NewClient(agentCfg, agentLogger)
+	go func() { _ = newClient.Run(newCtx) }()
+
+	deadlineFail := time.Now().Add(5 * time.Second)
+	var lastNodes []model.NodeInfo
+	for time.Now().Before(deadlineFail) {
 		nodesReq, _ := http.NewRequest(http.MethodGet, stack.httpSrv.URL+"/api/v1/admin/nodes", nil)
 		nodesReq.Header.Set("X-Admin-Token", "test-admin-secret")
 		nodesResp, err := http.DefaultClient.Do(nodesReq)
@@ -687,11 +876,91 @@ func TestAgentSelfUpdateDispatchAndApplyOverNATS(t *testing.T) {
 			_ = json.NewDecoder(nodesResp.Body).Decode(&nodesBody)
 			_ = nodesResp.Body.Close()
 			lastNodes = nodesBody.Nodes
-			if len(lastNodes) == 1 && lastNodes[0].UpdateStatus != nil && lastNodes[0].UpdateStatus.State == "restarting" {
+			if len(lastNodes) == 1 &&
+				lastNodes[0].UpdateStatus != nil &&
+				lastNodes[0].UpdateStatus.State == "failed" &&
+				strings.Contains(lastNodes[0].UpdateStatus.Message, "不一致") {
 				return
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("expected node update_status=restarting in NATS KV, got %+v", lastNodes)
+	t.Fatalf("expected update_status=failed on post-restart version mismatch, got %+v", lastNodes)
+}
+
+func TestAgentSelfUpdateRestartedSignalAndStuckTimeout(t *testing.T) {
+	stack := startTestStack(t, 20)
+
+	prevVer := agent.Version
+	agent.Version = "1.0.0"
+	defer func() { agent.Version = prevVer }()
+
+	rec, _ := registerDBNodeAndStartAgent(t, stack, "超时与信号测试节点", "华东", "DN11-BGP", 4211110779, 4)
+	waitForOnlineNodes(t, stack.httpSrv.URL, 1)
+
+	ctx := context.Background()
+	updatesKV, err := stack.broker.JetStream().KeyValue(ctx, "DOG_UPDATES")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Verify tableflip child "restarted" signal closes "restarting" -> "up_to_date".
+	curConnMs := stack.hub.ListNodes()[0].ConnectedAtMs
+	restartingRaw, _ := json.Marshal(model.AgentUpdateState{
+		TargetVersion:     "2.0.0",
+		PreviousVersion:   "1.0.0",
+		PrevConnectedAtMs: curConnMs,
+		State:             "restarting",
+		Message:           "正在平滑切换进程...",
+		UpdatedAtMs:       time.Now().UnixMilli(),
+	})
+	if _, err := updatesKV.Put(ctx, rec.ID.String(), restartingRaw); err != nil {
+		t.Fatal(err)
+	}
+
+	restartedSignal, _ := json.Marshal(model.AgentUpdateState{
+		TargetVersion: "2.0.0",
+		State:         "restarted",
+		Message:       "平滑重启完成，当前运行版本 2.0.0",
+		UpdatedAtMs:   time.Now().UnixMilli(),
+	})
+	if err := stack.broker.Conn().Publish("agent.update."+rec.ID.String(), restartedSignal); err != nil {
+		t.Fatal(err)
+	}
+	_ = stack.broker.Conn().Flush()
+
+	deadline := time.Now().Add(3 * time.Second)
+	converged := false
+	for time.Now().Before(deadline) {
+		nodes := stack.hub.ListNodes()
+		if len(nodes) == 1 && nodes[0].UpdateStatus != nil && nodes[0].UpdateStatus.State == "up_to_date" {
+			converged = true
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if !converged {
+		t.Fatalf("expected restarted signal to converge state to up_to_date, got %+v", stack.hub.ListNodes())
+	}
+
+	// 2. Verify a stuck "restarting" state (e.g. crashed binary, no new session) times out to "failed".
+	staleRestartingRaw, _ := json.Marshal(model.AgentUpdateState{
+		TargetVersion:     "3.0.0",
+		PreviousVersion:   "1.0.0",
+		PrevConnectedAtMs: curConnMs,
+		State:             "restarting",
+		Message:           "正在平滑切换进程...",
+		UpdatedAtMs:       time.Now().Add(-3 * time.Minute).UnixMilli(),
+	})
+	if _, err := updatesKV.Put(ctx, rec.ID.String(), staleRestartingRaw); err != nil {
+		t.Fatal(err)
+	}
+
+	afterTimeout := stack.hub.ListNodes()
+	if len(afterTimeout) != 1 || afterTimeout[0].UpdateStatus == nil || afterTimeout[0].UpdateStatus.State != "failed" {
+		t.Fatalf("expected stale restarting state to converge to failed, got %+v", afterTimeout)
+	}
+	if !strings.Contains(afterTimeout[0].UpdateStatus.Message, "等待节点重启上线超时") {
+		t.Fatalf("unexpected timeout failure message: %+v", afterTimeout[0].UpdateStatus)
+	}
 }

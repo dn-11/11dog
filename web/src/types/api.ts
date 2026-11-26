@@ -35,6 +35,8 @@ export interface MetaInfo {
 
 export interface AgentUpdateState {
   target_version?: string
+  previous_version?: string
+  prev_connected_at_ms?: number
   state: 'pending' | 'downloading' | 'verifying' | 'applying' | 'restarting' | 'up_to_date' | 'failed' | string
   message?: string
   updated_at_ms?: number

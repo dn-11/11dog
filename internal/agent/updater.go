@@ -28,6 +28,7 @@ func (c *Client) SetUpdateHooks(execPathFn func() (string, error), restartFn fun
 func (c *Client) handleAgentUpdate(
 	parentCtx context.Context,
 	nodeID uuid.UUID,
+	connectedAtMs int64,
 	upd *model.AgentUpdateCommand,
 	upg *processUpgrader,
 	reportFn func(model.AgentUpdateState),
@@ -42,10 +43,12 @@ func (c *Client) handleAgentUpdate(
 			return
 		}
 		reportFn(model.AgentUpdateState{
-			TargetVersion: targetVer,
-			State:         state,
-			Message:       message,
-			UpdatedAtMs:   time.Now().UnixMilli(),
+			TargetVersion:     targetVer,
+			PreviousVersion:   Version,
+			PrevConnectedAtMs: connectedAtMs,
+			State:             state,
+			Message:           message,
+			UpdatedAtMs:       time.Now().UnixMilli(),
 		})
 	}
 

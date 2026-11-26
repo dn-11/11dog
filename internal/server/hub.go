@@ -25,6 +25,12 @@ const (
 	kvNodesBucket   = "DOG_NODES"
 	kvUpdatesBucket = "DOG_UPDATES"
 	nodeOnlineTTL   = 35 * time.Second
+
+	updatePendingTimeout    = 60 * time.Second
+	updateDownloadTimeout   = 6 * time.Minute
+	updateApplyingTimeout   = 90 * time.Second
+	updateRestartingTimeout = 2 * time.Minute
+	restartTimeoutMsgPrefix = "等待节点重启上线超时"
 )
 
 // Hub manages stateless edge node telemetry (via NATS KV) and control commands (via Core NATS).
@@ -108,6 +114,173 @@ func (h *Hub) AuthManager() *natsauth.Manager {
 	return h.authMgr
 }
 
+func isUpdateInProgress(state string) bool {
+	switch state {
+	case "pending", "downloading", "verifying", "applying", "restarting":
+		return true
+	default:
+		return false
+	}
+}
+
+func updateStageTimeout(state string) (time.Duration, string) {
+	switch state {
+	case "pending":
+		return updatePendingTimeout, "等待节点响应更新指令超时"
+	case "downloading", "verifying":
+		return updateDownloadTimeout, "节点下载或校验更新包超时"
+	case "applying":
+		return updateApplyingTimeout, "节点替换二进制超时"
+	case "restarting":
+		return updateRestartingTimeout, restartTimeoutMsgPrefix
+	default:
+		return 0, ""
+	}
+}
+
+func isRestartTimeoutFailure(st *model.AgentUpdateState) bool {
+	return st != nil && st.State == "failed" && strings.HasPrefix(st.Message, restartTimeoutMsgPrefix)
+}
+
+func isTargetVersionMatch(targetVer, currentVer string) bool {
+	targetVer = strings.TrimSpace(targetVer)
+	currentVer = strings.TrimSpace(currentVer)
+	if targetVer == "" || targetVer == "dev" {
+		return true
+	}
+	return currentVer == targetVer
+}
+
+func isNewAgentSession(st *model.AgentUpdateState, hb *model.AgentHeartbeat) bool {
+	if st == nil || hb == nil || hb.ConnectedAtMs <= 0 {
+		return false
+	}
+	if st.PrevConnectedAtMs > 0 {
+		return hb.ConnectedAtMs != st.PrevConnectedAtMs
+	}
+	return st.State == "restarting" && st.UpdatedAtMs > 0 && hb.ConnectedAtMs >= st.UpdatedAtMs
+}
+
+func resolvePostRestartUpdateState(prev *model.AgentUpdateState, currentVersion string, nowMs int64) model.AgentUpdateState {
+	targetVer := ""
+	prevVer := ""
+	prevState := "restarting"
+	if prev != nil {
+		targetVer = strings.TrimSpace(prev.TargetVersion)
+		prevVer = strings.TrimSpace(prev.PreviousVersion)
+		prevState = prev.State
+	}
+	currVer := strings.TrimSpace(currentVersion)
+	dispVer := currVer
+	if dispVer == "" {
+		dispVer = "unknown"
+	}
+
+	switch prevState {
+	case "applying", "restarting", "failed":
+		if isTargetVersionMatch(targetVer, currVer) {
+			resolvedTarget := targetVer
+			if resolvedTarget == "" || resolvedTarget == "dev" {
+				resolvedTarget = currVer
+			}
+			return model.AgentUpdateState{
+				TargetVersion: resolvedTarget,
+				State:         "up_to_date",
+				Message:       fmt.Sprintf("更新已完成，当前运行版本 %s", dispVer),
+				UpdatedAtMs:   nowMs,
+			}
+		}
+		return model.AgentUpdateState{
+			TargetVersion: targetVer,
+			State:         "failed",
+			Message:       fmt.Sprintf("节点重启后版本 (%s) 与目标版本 (%s) 不一致", dispVer, targetVer),
+			UpdatedAtMs:   nowMs,
+		}
+	default:
+		if targetVer != "" && targetVer != "dev" && currVer == targetVer && currVer != prevVer {
+			return model.AgentUpdateState{
+				TargetVersion: targetVer,
+				State:         "up_to_date",
+				Message:       fmt.Sprintf("更新已完成，当前运行版本 %s", dispVer),
+				UpdatedAtMs:   nowMs,
+			}
+		}
+		return model.AgentUpdateState{
+			TargetVersion: targetVer,
+			State:         "failed",
+			Message:       fmt.Sprintf("节点在更新完成前发生重启（当前版本 %s）", dispVer),
+			UpdatedAtMs:   nowMs,
+		}
+	}
+}
+
+func (h *Hub) getRawNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID) *model.AgentUpdateState {
+	entry, err := h.updatesKV.Get(ctx, nodeID.String())
+	if err != nil {
+		return nil
+	}
+	var st model.AgentUpdateState
+	if err := json.Unmarshal(entry.Value(), &st); err != nil {
+		return nil
+	}
+	return &st
+}
+
+func (h *Hub) putNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID, st model.AgentUpdateState) bool {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return false
+	}
+	if _, err := h.updatesKV.Put(ctx, nodeID.String(), data); err != nil {
+		h.logger.Warn("failed to store agent update status in NATS KV", "node_id", nodeID, "error", err)
+		return false
+	}
+	h.logger.Info("agent update status reported",
+		"node_id", nodeID,
+		"target_version", st.TargetVersion,
+		"state", st.State,
+		"message", st.Message,
+	)
+	return true
+}
+
+func (h *Hub) reconcileNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID, st *model.AgentUpdateState, hb *model.AgentHeartbeat) *model.AgentUpdateState {
+	if st == nil {
+		return nil
+	}
+	nowMs := time.Now().UnixMilli()
+
+	if isUpdateInProgress(st.State) {
+		if isNewAgentSession(st, hb) {
+			resolved := resolvePostRestartUpdateState(st, hb.Version, nowMs)
+			h.putNodeUpdateStatus(ctx, nodeID, resolved)
+			return &resolved
+		}
+		if timeout, reason := updateStageTimeout(st.State); timeout > 0 && st.UpdatedAtMs > 0 && nowMs-st.UpdatedAtMs > timeout.Milliseconds() {
+			timedOut := model.AgentUpdateState{
+				TargetVersion:     st.TargetVersion,
+				PreviousVersion:   st.PreviousVersion,
+				PrevConnectedAtMs: st.PrevConnectedAtMs,
+				State:             "failed",
+				Message:           reason,
+				UpdatedAtMs:       nowMs,
+			}
+			h.putNodeUpdateStatus(ctx, nodeID, timedOut)
+			return &timedOut
+		}
+		return st
+	}
+
+	// Allow late-reconnecting upgraded process to clear a prior restart-wait timeout.
+	if isRestartTimeoutFailure(st) && isNewAgentSession(st, hb) && isTargetVersionMatch(st.TargetVersion, hb.Version) {
+		resolved := resolvePostRestartUpdateState(st, hb.Version, nowMs)
+		h.putNodeUpdateStatus(ctx, nodeID, resolved)
+		return &resolved
+	}
+
+	return st
+}
+
 func (h *Hub) handleHeartbeatMsg(msg *natsgo.Msg) {
 	var hb model.AgentHeartbeat
 	if err := json.Unmarshal(msg.Data, &hb); err != nil {
@@ -133,6 +306,9 @@ func (h *Hub) handleHeartbeatMsg(msg *natsgo.Msg) {
 	if _, err := h.nodesKV.Put(ctx, nodeID.String(), data); err != nil {
 		h.logger.Warn("failed to store agent heartbeat in NATS KV", "node_id", nodeID, "error", err)
 	}
+	if prev := h.getRawNodeUpdateStatus(ctx, nodeID); prev != nil {
+		_ = h.reconcileNodeUpdateStatus(ctx, nodeID, prev, &hb)
+	}
 }
 
 func (h *Hub) handleUpdateStatusMsg(msg *natsgo.Msg) {
@@ -140,29 +316,50 @@ func (h *Hub) handleUpdateStatusMsg(msg *natsgo.Msg) {
 	if err := json.Unmarshal(msg.Data, &st); err != nil {
 		return
 	}
-	if st.UpdatedAtMs == 0 {
-		st.UpdatedAtMs = time.Now().UnixMilli()
-	}
 	nodeID, err := uuid.Parse(strings.TrimPrefix(msg.Subject, "agent.update."))
-	if err != nil {
-		return
-	}
-	data, err := json.Marshal(st)
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := h.updatesKV.Put(ctx, nodeID.String(), data); err != nil {
-		h.logger.Warn("failed to store agent update status in NATS KV", "node_id", nodeID, "error", err)
+
+	nowMs := time.Now().UnixMilli()
+	prev := h.getRawNodeUpdateStatus(ctx, nodeID)
+
+	if st.State == "restarted" {
+		reportedVer := strings.TrimSpace(st.TargetVersion)
+		if prev == nil {
+			return
+		}
+		if isUpdateInProgress(prev.State) || (isRestartTimeoutFailure(prev) && isTargetVersionMatch(prev.TargetVersion, reportedVer)) {
+			resolved := resolvePostRestartUpdateState(prev, reportedVer, nowMs)
+			h.putNodeUpdateStatus(ctx, nodeID, resolved)
+		}
 		return
 	}
-	h.logger.Info("agent update status reported",
-		"node_id", nodeID,
-		"target_version", st.TargetVersion,
-		"state", st.State,
-		"message", st.Message,
-	)
+
+	st.UpdatedAtMs = nowMs
+	if prev != nil {
+		if st.TargetVersion == "" {
+			st.TargetVersion = prev.TargetVersion
+		}
+		if st.PreviousVersion == "" {
+			st.PreviousVersion = prev.PreviousVersion
+		}
+		if st.PrevConnectedAtMs == 0 {
+			st.PrevConnectedAtMs = prev.PrevConnectedAtMs
+		}
+	}
+
+	if isUpdateInProgress(st.State) {
+		if hb, ok := h.getNodeHeartbeat(ctx, nodeID); ok && isNewAgentSession(&st, hb) {
+			resolved := resolvePostRestartUpdateState(&st, hb.Version, nowMs)
+			h.putNodeUpdateStatus(ctx, nodeID, resolved)
+			return
+		}
+	}
+
+	h.putNodeUpdateStatus(ctx, nodeID, st)
 }
 
 func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID uuid.UUID) (*model.AgentHeartbeat, bool) {
@@ -177,16 +374,12 @@ func (h *Hub) getNodeHeartbeat(ctx context.Context, nodeID uuid.UUID) (*model.Ag
 	return &hb, true
 }
 
-func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID) *model.AgentUpdateState {
-	entry, err := h.updatesKV.Get(ctx, nodeID.String())
-	if err != nil {
+func (h *Hub) getNodeUpdateStatus(ctx context.Context, nodeID uuid.UUID, liveHB *model.AgentHeartbeat) *model.AgentUpdateState {
+	st := h.getRawNodeUpdateStatus(ctx, nodeID)
+	if st == nil {
 		return nil
 	}
-	var st model.AgentUpdateState
-	if err := json.Unmarshal(entry.Value(), &st); err != nil {
-		return nil
-	}
-	return &st
+	return h.reconcileNodeUpdateStatus(ctx, nodeID, st, liveHB)
 }
 
 // CancelTask publishes a cancellation command to a specific node over Core NATS.
@@ -269,10 +462,12 @@ func (h *Hub) TriggerAgentUpdate(nodeID uuid.UUID, req model.AdminTriggerUpdateR
 	}
 
 	pending := model.AgentUpdateState{
-		TargetVersion: targetVersion,
-		State:         "pending",
-		Message:       "已下发更新指令",
-		UpdatedAtMs:   time.Now().UnixMilli(),
+		TargetVersion:     targetVersion,
+		PreviousVersion:   hb.Version,
+		PrevConnectedAtMs: hb.ConnectedAtMs,
+		State:             "pending",
+		Message:           "已下发更新指令",
+		UpdatedAtMs:       time.Now().UnixMilli(),
 	}
 	if pendingBytes, err := json.Marshal(pending); err == nil {
 		_, _ = h.updatesKV.Put(ctx, nodeID.String(), pendingBytes)
@@ -366,7 +561,9 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 			Status:         "offline",
 			Capabilities:   []model.ProbeType{model.ProbePing, model.ProbeTcping, model.ProbeHTTP, model.ProbeTraceroute, model.ProbeDNS},
 		}
+		var liveHB *model.AgentHeartbeat
 		if hb, ok := h.getNodeHeartbeat(ctx, rec.ID); ok {
+			liveHB = hb
 			info.Status = "online"
 			info.IPv4 = hb.IPv4
 			info.IPv6 = hb.IPv6
@@ -386,7 +583,7 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 			info.ConnectedAtMs = hb.ConnectedAtMs
 			info.Labels = hb.Labels
 		}
-		info.UpdateStatus = h.getNodeUpdateStatus(ctx, rec.ID)
+		info.UpdateStatus = h.getNodeUpdateStatus(ctx, rec.ID, liveHB)
 		info.QueueDepth = h.broker.QueueDepth(rec.ID)
 		nodes = append(nodes, info)
 	}

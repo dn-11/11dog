@@ -41,6 +41,22 @@ var builtinCapabilities = []model.ProbeType{
 // Version is set via ldflags at build time.
 var Version = "dev"
 
+var lastConnectedAtMs atomic.Int64
+
+func nextConnectedAtMs() int64 {
+	now := time.Now().UnixMilli()
+	for {
+		prev := lastConnectedAtMs.Load()
+		next := now
+		if next <= prev {
+			next = prev + 1
+		}
+		if lastConnectedAtMs.CompareAndSwap(prev, next) {
+			return next
+		}
+	}
+}
+
 // Client manages the direct NATS JetStream connection, edge concurrency guard,
 // task execution, control commands, and heartbeat reporting.
 type Client struct {
@@ -178,7 +194,7 @@ func (c *Client) Run(ctx context.Context) error {
 		return fmt.Errorf("init jetstream: %w", err)
 	}
 
-	connectedAtMs := time.Now().UnixMilli()
+	connectedAtMs := nextConnectedAtMs()
 	c.logger.Info("connected to NATS with JWT/NKey credentials",
 		"nats_addr", c.cfg.NATSAddr,
 		"node_id", nodeID,
@@ -210,7 +226,7 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 			return
 		}
-		go c.handleAgentUpdate(runCtx, nodeID, &cmd, upg, func(st model.AgentUpdateState) {
+		go c.handleAgentUpdate(runCtx, nodeID, connectedAtMs, &cmd, upg, func(st model.AgentUpdateState) {
 			if payload, err := json.Marshal(st); err == nil {
 				_ = nc.Publish("agent.update."+idStr, payload)
 				_ = nc.Flush()
@@ -256,6 +272,18 @@ func (c *Client) Run(ctx context.Context) error {
 	// Signal tableflip that this (potentially newly upgraded) process is connected and ready.
 	if err := upg.Ready(); err != nil {
 		return fmt.Errorf("tableflip ready: %w", err)
+	}
+	if upg.HasParent() {
+		restartedState := model.AgentUpdateState{
+			TargetVersion: Version,
+			State:         "restarted",
+			Message:       fmt.Sprintf("平滑重启完成，当前运行版本 %s", Version),
+			UpdatedAtMs:   time.Now().UnixMilli(),
+		}
+		if payload, err := json.Marshal(restartedState); err == nil {
+			_ = nc.Publish("agent.update."+idStr, payload)
+		}
+		_ = nc.Flush()
 	}
 
 	go func() {

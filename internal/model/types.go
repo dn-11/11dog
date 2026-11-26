@@ -57,10 +57,12 @@ type DN11Match struct {
 
 // AgentUpdateState tracks the latest self-update progress reported by an edge agent.
 type AgentUpdateState struct {
-	TargetVersion string `json:"target_version,omitempty"`
-	State         string `json:"state"` // pending | downloading | verifying | applying | restarting | up_to_date | failed
-	Message       string `json:"message,omitempty"`
-	UpdatedAtMs   int64  `json:"updated_at_ms,omitempty"`
+	TargetVersion     string `json:"target_version,omitempty"`
+	PreviousVersion   string `json:"previous_version,omitempty"`
+	PrevConnectedAtMs int64  `json:"prev_connected_at_ms,omitempty"`
+	State             string `json:"state"` // pending | downloading | verifying | applying | restarting | up_to_date | failed
+	Message           string `json:"message,omitempty"`
+	UpdatedAtMs       int64  `json:"updated_at_ms,omitempty"`
 }
 
 // NodeInfo describes an edge probe node and its live internal telemetry (admin only).
