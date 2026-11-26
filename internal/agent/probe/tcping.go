@@ -17,7 +17,7 @@ func runTcping(ctx context.Context, target string, p model.TcpingParams) (string
 	if p.Port == 0 || p.Port > 65535 {
 		return "", nil, model.StatusError, fmt.Errorf("invalid port %d", p.Port)
 	}
-	addr, err := resolveHost(ctx, target, p.IPVersion)
+	addr, err := resolveHost(ctx, target)
 	if err != nil {
 		return "", nil, model.StatusError, err
 	}
@@ -32,10 +32,7 @@ func runTcping(ctx context.Context, target string, p model.TcpingParams) (string
 		interval = 300 * time.Millisecond
 	}
 
-	network := "tcp4"
-	if addr.Is6() {
-		network = "tcp6"
-	}
+	const network = "tcp4"
 	dialAddr := net.JoinHostPort(resolvedIP, strconv.Itoa(int(p.Port)))
 
 	var rtts []float64

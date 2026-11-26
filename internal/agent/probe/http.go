@@ -38,13 +38,7 @@ func runHTTP(ctx context.Context, target string, p model.HTTPParams) (string, *m
 		firstByte  time.Time
 	)
 
-	dialNetwork := "tcp"
-	switch strings.ToLower(p.IPVersion) {
-	case "ipv4":
-		dialNetwork = "tcp4"
-	case "ipv6":
-		dialNetwork = "tcp6"
-	}
+	const dialNetwork = "tcp4"
 
 	baseDialer := &net.Dialer{Timeout: 8 * time.Second}
 	tr := &http.Transport{

@@ -12,7 +12,6 @@ const { snapshot, resultsList, running, errorMsg, startSingle } = useProbeTask()
 
 const target = ref('')
 const recordType = ref('A')
-const dnsServer = ref('')
 const selectedNodeIDs = ref<string[]>([])
 const ipFilter = ref('')
 const initializedSelection = ref(false)
@@ -37,8 +36,7 @@ function handleStart() {
     node_ids: selectedNodeIDs.value.length > 0 ? selectedNodeIDs.value : undefined,
     params: {
       dns: {
-        record_type: recordType.value,
-        dns_server: dnsServer.value.trim() || undefined
+        record_type: recordType.value
       }
     }
   })
@@ -64,7 +62,6 @@ function handleStart() {
             <label>记录</label>
             <select v-model="recordType">
               <option value="A">A</option>
-              <option value="AAAA">AAAA</option>
               <option value="CNAME">CNAME</option>
               <option value="MX">MX</option>
               <option value="TXT">TXT</option>
@@ -72,11 +69,6 @@ function handleStart() {
               <option value="PTR">PTR</option>
               <option value="SOA">SOA</option>
             </select>
-          </div>
-
-          <div class="inline-field">
-            <label>DNS</label>
-            <input v-model="dnsServer" type="text" placeholder="默认系统DNS" style="width: 120px" />
           </div>
 
           <button type="submit" class="btn btn-primary" :disabled="!target.trim() || running">

@@ -99,7 +99,6 @@ func DefaultServerConfig() *ServerConfig {
 		},
 		DN11Prefixes: []dn11.PrefixEntry{
 			{CIDR: "172.16.0.0/16", ASN: 4211110000, Owner: "DN11 Backbone", Region: "DN11"},
-			{CIDR: "fd00::/48", ASN: 4211110000, Owner: "DN11 IPv6 Backbone", Region: "DN11"},
 		},
 	}
 }

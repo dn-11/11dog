@@ -49,7 +49,6 @@ export interface AdminNodeInfo {
   group: string
   asn: number
   ipv4?: string
-  ipv6?: string
   capabilities: ProbeType[]
   max_concurrency: number
   active_tasks: number
@@ -144,14 +143,12 @@ export interface PingParams {
   count?: number
   interval_ms?: number
   packet_size?: number
-  ip_version?: string
 }
 
 export interface TcpingParams {
   port: number
   count?: number
   interval_ms?: number
-  ip_version?: string
 }
 
 export interface HTTPParams {
@@ -160,19 +157,16 @@ export interface HTTPParams {
   headers?: Record<string, string>
   follow_redirects?: boolean
   insecure_skip_verify?: boolean
-  ip_version?: string
 }
 
 export interface TracerouteParams {
   max_hops?: number
   queries_per_hop?: number
   protocol?: string
-  ip_version?: string
 }
 
 export interface DNSParams {
   record_type?: string
-  dns_server?: string
 }
 
 export interface ProbeParams {
@@ -269,7 +263,6 @@ export interface DNSRecord {
 }
 
 export interface DNSResult {
-  server_used: string
   query_time_ms: number
   rcode: string
   records: DNSRecord[]
@@ -318,6 +311,8 @@ export interface TaskEvent {
   node_id?: string
   type?: ProbeType
   status?: TaskStatus
+  resolved_ip?: string
+  resolved_dn11?: DN11Match
   progress?: {
     ping_packet?: PingPacket
     traceroute_hop?: TracerouteHop

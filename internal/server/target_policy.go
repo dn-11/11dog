@@ -292,6 +292,9 @@ func compileRuleList(field string, rules []string) ([]string, compiledTargetRule
 			if err != nil {
 				return nil, compiledTargetRuleSet{}, fmt.Errorf("%s 包含无效 CIDR 规则 %q: %w", field, r, err)
 			}
+			if !p.Addr().Unmap().Is4() {
+				return nil, compiledTargetRuleSet{}, fmt.Errorf("%s 暂不支持 IPv6 CIDR 规则 %q", field, r)
+			}
 			p = p.Masked()
 			canon := p.String()
 			if _, dup := seen[canon]; !dup {
@@ -305,6 +308,9 @@ func compileRuleList(field string, rules []string) ([]string, compiledTargetRule
 		unbracketed := strings.Trim(r, "[]")
 		if addr, err := netip.ParseAddr(unbracketed); err == nil {
 			addr = addr.Unmap()
+			if !addr.Is4() {
+				return nil, compiledTargetRuleSet{}, fmt.Errorf("%s 暂不支持 IPv6 地址规则 %q", field, r)
+			}
 			p := netip.PrefixFrom(addr, addr.BitLen())
 			canon := addr.String()
 			if _, dup := seen[canon]; !dup {

@@ -11,11 +11,10 @@ import (
 	"github.com/dn-11/11dog/internal/model"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
 func runTraceroute(ctx context.Context, target string, p model.TracerouteParams, onProgress ProgressFunc) (string, *model.TracerouteResult, model.TaskStatus, error) {
-	addr, err := resolveHost(ctx, target, p.IPVersion)
+	addr, err := resolveHost(ctx, target)
 	if err != nil {
 		return "", nil, model.StatusError, err
 	}
@@ -36,28 +35,20 @@ func runTraceroute(ctx context.Context, target string, p model.TracerouteParams,
 		queriesPerHop = 5
 	}
 
-	isV6 := addr.Is6()
-	var conn *icmp.PacketConn
-	protoNum := 1
-	var reqType, replyType, timeExceededType icmp.Type
-	if !isV6 {
-		conn, err = icmp.ListenPacket("ip4:icmp", "0.0.0.0")
-		reqType = ipv4.ICMPTypeEcho
-		replyType = ipv4.ICMPTypeEchoReply
-		timeExceededType = ipv4.ICMPTypeTimeExceeded
-	} else {
-		conn, err = icmp.ListenPacket("ip6:ipv6-icmp", "::")
-		protoNum = 58
-		reqType = ipv6.ICMPTypeEchoRequest
-		replyType = ipv6.ICMPTypeEchoReply
-		timeExceededType = ipv6.ICMPTypeTimeExceeded
-	}
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		return resolvedIP, nil, model.StatusError, fmt.Errorf("traceroute requires raw ICMP socket (CAP_NET_RAW): %w", err)
 	}
 	defer conn.Close()
 
-	dst := &net.IPAddr{IP: addr.AsSlice(), Zone: addr.Zone()}
+	const protoNum = 1
+	var (
+		reqType          icmp.Type = ipv4.ICMPTypeEcho
+		replyType        icmp.Type = ipv4.ICMPTypeEchoReply
+		timeExceededType icmp.Type = ipv4.ICMPTypeTimeExceeded
+	)
+
+	dst := &net.IPAddr{IP: addr.AsSlice()}
 	icmpID := randomID16()
 	seqCounter := 0
 	payload := []byte("11dog-traceroute")
@@ -71,14 +62,8 @@ func runTraceroute(ctx context.Context, target string, p model.TracerouteParams,
 			break
 		}
 
-		if !isV6 {
-			if err := conn.IPv4PacketConn().SetTTL(ttl); err != nil {
-				return resolvedIP, nil, model.StatusError, err
-			}
-		} else {
-			if err := conn.IPv6PacketConn().SetHopLimit(ttl); err != nil {
-				return resolvedIP, nil, model.StatusError, err
-			}
+		if err := conn.IPv4PacketConn().SetTTL(ttl); err != nil {
+			return resolvedIP, nil, model.StatusError, err
 		}
 
 		hop := model.TracerouteHop{
@@ -155,7 +140,7 @@ func runTraceroute(ctx context.Context, target string, p model.TracerouteParams,
 					if !ok {
 						continue
 					}
-					origID, origSeq, matchOK := extractEmbeddedEchoIDSeq(te.Data, isV6)
+					origID, origSeq, matchOK := extractEmbeddedEchoIDSeq(te.Data)
 					if !matchOK || origID != icmpID || origSeq != curSeq {
 						continue
 					}
@@ -211,19 +196,14 @@ func runTraceroute(ctx context.Context, target string, p model.TracerouteParams,
 	}, status, nil
 }
 
-// extractEmbeddedEchoIDSeq extracts the original ICMP Echo ID and Seq embedded in a TimeExceeded packet body.
-func extractEmbeddedEchoIDSeq(data []byte, isV6 bool) (id int, seq int, ok bool) {
-	var ipHdrLen int
-	if !isV6 {
-		if len(data) < 20 {
-			return 0, 0, false
-		}
-		ipHdrLen = int(data[0]&0x0f) * 4
-		if ipHdrLen < 20 {
-			return 0, 0, false
-		}
-	} else {
-		ipHdrLen = 40
+// extractEmbeddedEchoIDSeq extracts the original IPv4 ICMP Echo ID and Seq embedded in a TimeExceeded packet body.
+func extractEmbeddedEchoIDSeq(data []byte) (id int, seq int, ok bool) {
+	if len(data) < 20 {
+		return 0, 0, false
+	}
+	ipHdrLen := int(data[0]&0x0f) * 4
+	if ipHdrLen < 20 {
+		return 0, 0, false
 	}
 	// Original ICMP Echo header needs 8 bytes: type(1), code(1), csum(2), id(2), seq(2).
 	if len(data) < ipHdrLen+8 {

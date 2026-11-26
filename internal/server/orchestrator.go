@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -21,6 +22,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const fixedDN11DNSServer = "172.16.255.53"
+
 var (
 	ErrInvalidRequest   = errors.New("invalid task request")
 	ErrNoNodesAvailable = errors.New("no matching online nodes available")
@@ -28,10 +31,11 @@ var (
 )
 
 type taskRecord struct {
-	mu       sync.Mutex
-	snapshot *model.TaskSnapshot
-	done     bool
-	unsub    func()
+	mu          sync.Mutex
+	snapshot    *model.TaskSnapshot
+	done        bool
+	unsub       func()
+	subscribers map[chan *model.TaskEvent]struct{}
 }
 
 // Orchestrator validates diagnostic tasks, dispatches them through the MQ buffer,
@@ -134,6 +138,13 @@ func (o *Orchestrator) validateAndNormalize(req *model.CreateTaskRequest) (uint3
 			return 0, fmt.Errorf("%w: target contains invalid control characters", ErrInvalidRequest)
 		}
 	}
+	if host := extractTargetHost(req.Target); host != "" {
+		if addr, err := netip.ParseAddr(host); err == nil {
+			if !addr.Unmap().Is4() {
+				return 0, fmt.Errorf("%w: DN11 暂不支持 IPv6 地址探测", ErrInvalidRequest)
+			}
+		}
+	}
 
 	timeoutMs := req.TimeoutMs
 	if timeoutMs == 0 {
@@ -228,11 +239,12 @@ func (o *Orchestrator) validateAndNormalize(req *model.CreateTaskRequest) (uint3
 			rt = "A"
 		}
 		switch rt {
-		case "A", "AAAA", "CNAME", "MX", "TXT", "NS", "PTR", "SOA":
+		case "A", "CNAME", "MX", "TXT", "NS", "PTR", "SOA":
 		default:
 			return 0, fmt.Errorf("%w: unsupported dns record type %q", ErrInvalidRequest, rt)
 		}
 		req.Params.DNS.RecordType = rt
+		req.Params.DNS.DNSServer = fixedDN11DNSServer
 	}
 
 	// Enforce global target restrictions (domain wildcards & CIDRs) from in-memory cache.
@@ -365,8 +377,9 @@ func (o *Orchestrator) CreateTask(ctx context.Context, req model.CreateTaskReque
 	}
 
 	rec := &taskRecord{
-		snapshot: snapshot,
-		unsub:    unsub,
+		snapshot:    snapshot,
+		unsub:       unsub,
+		subscribers: make(map[chan *model.TaskEvent]struct{}),
 	}
 	o.mu.Lock()
 	o.tasks[taskID] = rec
@@ -434,17 +447,20 @@ func (o *Orchestrator) trackTaskEvents(rec *taskRecord, ch <-chan *model.TaskEve
 			}
 			allDone := o.applyEvent(rec, ev)
 			if allDone {
-				snap := o.cloneSnapshot(rec)
-				_ = o.broker.PublishResult(context.Background(), &model.TaskEvent{
-					EventType: "done",
-					TaskID:    snap.TaskID,
-					Snapshot:  snap,
-				})
 				rec.mu.Lock()
 				rec.done = true
 				unsub := rec.unsub
 				rec.unsub = nil
+				snap := cloneSnapshotLocked(rec)
+				doneEv := &model.TaskEvent{
+					EventType: "done",
+					TaskID:    snap.TaskID,
+					Snapshot:  snap,
+				}
+				broadcastLocked(rec, doneEv)
+				closeSubscribersLocked(rec)
 				rec.mu.Unlock()
+				_ = o.broker.PublishResult(context.Background(), doneEv)
 				if unsub != nil {
 					unsub()
 				}
@@ -465,18 +481,37 @@ func (o *Orchestrator) trackTaskEvents(rec *taskRecord, ch <-chan *model.TaskEve
 			rec.done = true
 			unsub := rec.unsub
 			rec.unsub = nil
+			snap := cloneSnapshotLocked(rec)
+			doneEv := &model.TaskEvent{
+				EventType: "done",
+				TaskID:    snap.TaskID,
+				Snapshot:  snap,
+			}
+			broadcastLocked(rec, doneEv)
+			closeSubscribersLocked(rec)
 			rec.mu.Unlock()
 			if unsub != nil {
 				unsub()
 			}
-			snap := o.cloneSnapshot(rec)
-			_ = o.broker.PublishResult(context.Background(), &model.TaskEvent{
-				EventType: "done",
-				TaskID:    snap.TaskID,
-				Snapshot:  snap,
-			})
+			_ = o.broker.PublishResult(context.Background(), doneEv)
 			return
 		}
+	}
+}
+
+func broadcastLocked(rec *taskRecord, ev *model.TaskEvent) {
+	for ch := range rec.subscribers {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
+}
+
+func closeSubscribersLocked(rec *taskRecord) {
+	for ch := range rec.subscribers {
+		delete(rec.subscribers, ch)
+		close(ch)
 	}
 }
 
@@ -489,11 +524,20 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 		return false
 	}
 
+	var outEv *model.TaskEvent
+
 	switch ev.EventType {
 	case "progress":
 		if !cur.Status.IsTerminal() && ev.Status != "" {
 			cur.Status = ev.Status
 		}
+		if ev.ResolvedIP != "" && cur.ResolvedIP == "" {
+			cur.ResolvedIP = ev.ResolvedIP
+			if o.dn11Reg != nil && cur.ResolvedDN11 == nil {
+				cur.ResolvedDN11 = o.dn11Reg.Lookup(cur.ResolvedIP)
+			}
+		}
+		var outProgress *model.ProgressPayload
 		if ev.Progress != nil && ev.Progress.TracerouteHop != nil {
 			if cur.Traceroute == nil {
 				cur.Traceroute = &model.TracerouteResult{}
@@ -516,12 +560,37 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 					return cur.Traceroute.Hops[i].Hop < cur.Traceroute.Hops[j].Hop
 				})
 			}
+			hopCopy := hop
+			outProgress = &model.ProgressPayload{TracerouteHop: &hopCopy}
 		}
 		if ev.Progress != nil && ev.Progress.PingPacket != nil {
 			if cur.Ping == nil {
 				cur.Ping = &model.PingResult{}
 			}
-			cur.Ping.Packets = append(cur.Ping.Packets, *ev.Progress.PingPacket)
+			pkt := *ev.Progress.PingPacket
+			cur.Ping.Packets = append(cur.Ping.Packets, pkt)
+			if pkt.ReplyIP != "" && cur.ResolvedIP == "" {
+				cur.ResolvedIP = pkt.ReplyIP
+				if o.dn11Reg != nil && cur.ResolvedDN11 == nil {
+					cur.ResolvedDN11 = o.dn11Reg.Lookup(cur.ResolvedIP)
+				}
+			}
+			if outProgress == nil {
+				outProgress = &model.ProgressPayload{}
+			}
+			pktCopy := pkt
+			outProgress.PingPacket = &pktCopy
+		}
+		outEv = &model.TaskEvent{
+			EventType:    "progress",
+			TaskID:       ev.TaskID,
+			SubtaskID:    ev.SubtaskID,
+			NodeID:       ev.NodeID,
+			Type:         cur.Type,
+			Status:       cur.Status,
+			ResolvedIP:   cur.ResolvedIP,
+			ResolvedDN11: cur.ResolvedDN11,
+			Progress:     outProgress,
 		}
 
 	case "result":
@@ -566,13 +635,40 @@ func (o *Orchestrator) applyEvent(rec *taskRecord, ev *model.TaskEvent) bool {
 					o.subtasksCompletedTotal.Add(1)
 				}
 			}
+			resCopy := copied
+			outEv = &model.TaskEvent{
+				EventType:    "result",
+				TaskID:       ev.TaskID,
+				SubtaskID:    ev.SubtaskID,
+				NodeID:       ev.NodeID,
+				Type:         copied.Type,
+				Status:       copied.Status,
+				ResolvedIP:   copied.ResolvedIP,
+				ResolvedDN11: copied.ResolvedDN11,
+				Result:       &resCopy,
+			}
 		} else {
 			cur.Status = ev.Status
 			cur.FinishedUnixMs = time.Now().UnixMilli()
+			resCopy := *cur
+			outEv = &model.TaskEvent{
+				EventType:    "result",
+				TaskID:       ev.TaskID,
+				SubtaskID:    ev.SubtaskID,
+				NodeID:       ev.NodeID,
+				Type:         cur.Type,
+				Status:       cur.Status,
+				ResolvedIP:   cur.ResolvedIP,
+				ResolvedDN11: cur.ResolvedDN11,
+				Result:       &resCopy,
+			}
 		}
 	}
 
 	recomputeCounters(rec.snapshot)
+	if outEv != nil {
+		broadcastLocked(rec, outEv)
+	}
 	return rec.snapshot.CompletedNodes >= rec.snapshot.TotalNodes
 }
 
@@ -591,9 +687,7 @@ func recomputeCounters(snap *model.TaskSnapshot) {
 	snap.OverloadedNodes = overloaded
 }
 
-func (o *Orchestrator) cloneSnapshot(rec *taskRecord) *model.TaskSnapshot {
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
+func cloneSnapshotLocked(rec *taskRecord) *model.TaskSnapshot {
 	src := rec.snapshot
 	cp := *src
 	cp.Results = make(map[uuid.UUID]*model.NodeTaskResult, len(src.Results))
@@ -602,6 +696,12 @@ func (o *Orchestrator) cloneSnapshot(rec *taskRecord) *model.TaskSnapshot {
 		cp.Results[k] = &vCopy
 	}
 	return &cp
+}
+
+func (o *Orchestrator) cloneSnapshot(rec *taskRecord) *model.TaskSnapshot {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return cloneSnapshotLocked(rec)
 }
 
 // GetTask returns the current snapshot of taskID.
@@ -615,8 +715,8 @@ func (o *Orchestrator) GetTask(taskID string) (*model.TaskSnapshot, bool) {
 	return o.cloneSnapshot(rec), true
 }
 
-// SubscribeTask atomically acquires the current snapshot and live event channel for SSE streaming.
-func (o *Orchestrator) SubscribeTask(ctx context.Context, taskID string) (*model.TaskSnapshot, <-chan *model.TaskEvent, func(), error) {
+// SubscribeTask atomically acquires the current enriched snapshot and live enriched event channel for SSE streaming.
+func (o *Orchestrator) SubscribeTask(_ context.Context, taskID string) (*model.TaskSnapshot, <-chan *model.TaskEvent, func(), error) {
 	o.mu.RLock()
 	rec, ok := o.tasks[taskID]
 	o.mu.RUnlock()
@@ -624,11 +724,31 @@ func (o *Orchestrator) SubscribeTask(ctx context.Context, taskID string) (*model
 		return nil, nil, nil, ErrTaskNotFound
 	}
 
-	ch, unsub, err := o.broker.SubscribeResult(ctx, taskID)
-	if err != nil {
-		return nil, nil, nil, err
+	ch := make(chan *model.TaskEvent, 64)
+	rec.mu.Lock()
+	snap := cloneSnapshotLocked(rec)
+	if rec.done {
+		close(ch)
+		rec.mu.Unlock()
+		return snap, ch, func() {}, nil
 	}
-	snap := o.cloneSnapshot(rec)
+	if rec.subscribers == nil {
+		rec.subscribers = make(map[chan *model.TaskEvent]struct{})
+	}
+	rec.subscribers[ch] = struct{}{}
+	rec.mu.Unlock()
+
+	var once sync.Once
+	unsub := func() {
+		once.Do(func() {
+			rec.mu.Lock()
+			if _, exists := rec.subscribers[ch]; exists {
+				delete(rec.subscribers, ch)
+				close(ch)
+			}
+			rec.mu.Unlock()
+		})
+	}
 	return snap, ch, unsub, nil
 }
 

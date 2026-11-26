@@ -73,7 +73,6 @@ type NodeInfo struct {
 	Group          string            `json:"group"`
 	ASN            uint32            `json:"asn"`
 	IPv4           string            `json:"ipv4,omitempty"`
-	IPv6           string            `json:"ipv6,omitempty"`
 	Capabilities   []ProbeType       `json:"capabilities"`
 	MaxConcurrency uint32            `json:"max_concurrency"`
 	ActiveTasks    uint32            `json:"active_tasks"`
@@ -179,7 +178,6 @@ type AdminOverview struct {
 type AgentHeartbeat struct {
 	NodeID          uuid.UUID         `json:"node_id"`
 	IPv4            string            `json:"ipv4,omitempty"`
-	IPv6            string            `json:"ipv6,omitempty"`
 	Capabilities    []ProbeType       `json:"capabilities,omitempty"`
 	MaxConcurrency  uint32            `json:"max_concurrency"`
 	ActiveTasks     uint32            `json:"active_tasks"`
@@ -238,14 +236,12 @@ type PingParams struct {
 	Count      uint32 `json:"count,omitempty"`
 	IntervalMs uint32 `json:"interval_ms,omitempty"`
 	PacketSize uint32 `json:"packet_size,omitempty"`
-	IPVersion  string `json:"ip_version,omitempty"` // auto, ipv4, ipv6
 }
 
 type TcpingParams struct {
 	Port       uint32 `json:"port"`
 	Count      uint32 `json:"count,omitempty"`
 	IntervalMs uint32 `json:"interval_ms,omitempty"`
-	IPVersion  string `json:"ip_version,omitempty"`
 }
 
 type HTTPParams struct {
@@ -254,18 +250,16 @@ type HTTPParams struct {
 	Headers            map[string]string `json:"headers,omitempty"`
 	FollowRedirects    bool              `json:"follow_redirects,omitempty"`
 	InsecureSkipVerify bool              `json:"insecure_skip_verify,omitempty"`
-	IPVersion          string            `json:"ip_version,omitempty"`
 }
 
 type TracerouteParams struct {
 	MaxHops       uint32 `json:"max_hops,omitempty"`
 	QueriesPerHop uint32 `json:"queries_per_hop,omitempty"`
 	Protocol      string `json:"protocol,omitempty"` // icmp, udp
-	IPVersion     string `json:"ip_version,omitempty"`
 }
 
 type DNSParams struct {
-	RecordType string `json:"record_type,omitempty"` // A, AAAA, CNAME, MX, TXT, NS, PTR, SOA
+	RecordType string `json:"record_type,omitempty"` // A, CNAME, MX, TXT, NS, PTR, SOA
 	DNSServer  string `json:"dns_server,omitempty"`
 }
 
@@ -397,13 +391,15 @@ type ProgressPayload struct {
 
 // TaskEvent is published over MQ and streamed via SSE to connected clients.
 type TaskEvent struct {
-	EventType string           `json:"event_type"` // snapshot, progress, result, done
-	TaskID    string           `json:"task_id"`
-	SubtaskID string           `json:"subtask_id,omitempty"`
-	NodeID    uuid.UUID        `json:"node_id,omitempty"`
-	Type      ProbeType        `json:"type,omitempty"`
-	Status    TaskStatus       `json:"status,omitempty"`
-	Progress  *ProgressPayload `json:"progress,omitempty"`
-	Result    *NodeTaskResult  `json:"result,omitempty"`
-	Snapshot  *TaskSnapshot    `json:"snapshot,omitempty"`
+	EventType    string           `json:"event_type"` // snapshot, progress, result, done
+	TaskID       string           `json:"task_id"`
+	SubtaskID    string           `json:"subtask_id,omitempty"`
+	NodeID       uuid.UUID        `json:"node_id,omitempty"`
+	Type         ProbeType        `json:"type,omitempty"`
+	Status       TaskStatus       `json:"status,omitempty"`
+	ResolvedIP   string           `json:"resolved_ip,omitempty"`
+	ResolvedDN11 *DN11Match       `json:"resolved_dn11,omitempty"`
+	Progress     *ProgressPayload `json:"progress,omitempty"`
+	Result       *NodeTaskResult  `json:"result,omitempty"`
+	Snapshot     *TaskSnapshot    `json:"snapshot,omitempty"`
 }

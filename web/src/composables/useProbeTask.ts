@@ -166,6 +166,12 @@ export function useProbeTask() {
           ) {
             cur.status = ev.status
           }
+          if (ev.resolved_ip && !cur.resolved_ip) {
+            cur.resolved_ip = ev.resolved_ip
+          }
+          if (ev.resolved_dn11 && !cur.resolved_dn11) {
+            cur.resolved_dn11 = ev.resolved_dn11
+          }
           if (ev.progress?.traceroute_hop) {
             if (!cur.traceroute) {
               cur.traceroute = { reached: false, hops: [] }
@@ -199,7 +205,17 @@ export function useProbeTask() {
         onResult(ev) {
           if (!snapshot.value || !ev.node_id) return
           if (ev.result) {
-            snapshot.value.results[ev.node_id] = ev.result
+            const prev = snapshot.value.results[ev.node_id]
+            snapshot.value.results[ev.node_id] = {
+              ...prev,
+              ...ev.result,
+              node_name: ev.result.node_name || prev?.node_name || '',
+              region: ev.result.region || prev?.region || '',
+              group: ev.result.group || prev?.group || '',
+              node_asn: ev.result.node_asn || prev?.node_asn || 0,
+              resolved_ip: ev.result.resolved_ip || ev.resolved_ip || prev?.resolved_ip,
+              resolved_dn11: ev.result.resolved_dn11 || ev.resolved_dn11 || prev?.resolved_dn11
+            }
           }
           recalcSnapshotCounts(snapshot.value)
         },

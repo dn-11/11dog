@@ -964,3 +964,131 @@ func TestAgentSelfUpdateRestartedSignalAndStuckTimeout(t *testing.T) {
 		t.Fatalf("unexpected timeout failure message: %+v", afterTimeout[0].UpdateStatus)
 	}
 }
+
+func TestSSERealtimeDN11EnrichmentAndFixedDNSAndNoIPv6(t *testing.T) {
+	stack := startTestStack(t, 20)
+	rec1, _ := registerDBNodeAndStartAgent(t, stack, "香港节点 01", "香港", "DN11-BGP", 4211110101, 4)
+	rec2, _ := registerDBNodeAndStartAgent(t, stack, "东京节点 02", "东京", "DN11-IX", 4211110202, 4)
+	waitForOnlineNodes(t, stack.httpSrv.URL, 2)
+
+	// 1. IPv6 target and AAAA DNS record type must be rejected.
+	for _, payload := range []string{
+		`{"type":"ping","target":"fd00::1"}`,
+		`{"type":"dns","target":"example.dn11","params":{"dns":{"record_type":"AAAA"}}}`,
+	} {
+		resp, err := http.Post(stack.httpSrv.URL+"/api/v1/tasks", "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 for IPv6/AAAA request %s, got %d", payload, resp.StatusCode)
+		}
+	}
+
+	// 2. DNS task always forces dns_server to 172.16.255.53 even if client tries to override.
+	dnsSnap := createTaskHTTP(t, stack.httpSrv.URL, model.CreateTaskRequest{
+		Type:   model.ProbeDNS,
+		Target: "example.dn11",
+		Params: model.ProbeParams{
+			DNS: &model.DNSParams{
+				RecordType: "A",
+				DNSServer:  "8.8.8.8",
+			},
+		},
+	})
+	if dnsSnap.Params.DNS == nil || dnsSnap.Params.DNS.DNSServer != "172.16.255.53" {
+		t.Fatalf("expected fixed DNS server 172.16.255.53, got %+v", dnsSnap.Params.DNS)
+	}
+
+	// 3. Verify SSE "progress" and "result" events carry DN11 ASN ownership BEFORE "done".
+	snap := createTaskHTTP(t, stack.httpSrv.URL, model.CreateTaskRequest{
+		Type:    model.ProbeTraceroute,
+		Target:  "172.16.10.1",
+		NodeIDs: []uuid.UUID{rec1.ID, rec2.ID},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, stack.httpSrv.URL+"/api/v1/tasks/"+snap.TaskID+"/stream", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Publish a progress hop & result for rec1 only (leaving rec2 unfinished so "done" is NOT emitted yet).
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		_ = stack.broker.PublishResult(context.Background(), &model.TaskEvent{
+			EventType: "progress",
+			TaskID:    snap.TaskID,
+			NodeID:    rec1.ID,
+			Type:      model.ProbeTraceroute,
+			Status:    model.StatusRunning,
+			Progress: &model.ProgressPayload{
+				TracerouteHop: &model.TracerouteHop{
+					Hop:      1,
+					IP:       "172.16.1.1",
+					RTTsMs:   []float64{2.5},
+					AvgRTTMs: 2.5,
+				},
+			},
+		})
+		time.Sleep(40 * time.Millisecond)
+		_ = stack.broker.PublishResult(context.Background(), &model.TaskEvent{
+			EventType: "result",
+			TaskID:    snap.TaskID,
+			NodeID:    rec1.ID,
+			Type:      model.ProbeTraceroute,
+			Status:    model.StatusCompleted,
+			Result: &model.NodeTaskResult{
+				TaskID:     snap.TaskID,
+				NodeID:     rec1.ID,
+				Type:       model.ProbeTraceroute,
+				Status:     model.StatusCompleted,
+				ResolvedIP: "172.16.10.1",
+			},
+		})
+	}()
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var curEvent string
+	gotProgressDN11 := false
+	gotResultDN11 := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			curEvent = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		switch curEvent {
+		case "progress":
+			var ev model.TaskEvent
+			if err := json.Unmarshal([]byte(data), &ev); err == nil &&
+				ev.Progress != nil && ev.Progress.TracerouteHop != nil &&
+				ev.Progress.TracerouteHop.DN11 != nil &&
+				ev.Progress.TracerouteHop.DN11.ASN == 4211110000 {
+				gotProgressDN11 = true
+			}
+		case "result":
+			var ev model.TaskEvent
+			if err := json.Unmarshal([]byte(data), &ev); err == nil &&
+				ev.Result != nil &&
+				ev.Result.NodeName == "香港节点 01" &&
+				ev.Result.ResolvedDN11 != nil &&
+				ev.Result.ResolvedDN11.ASN == 4211110000 {
+				gotResultDN11 = true
+			}
+		}
+		if gotProgressDN11 && gotResultDN11 {
+			return
+		}
+	}
+	t.Fatalf("expected live SSE DN11 enrichment before done: gotProgressDN11=%v gotResultDN11=%v", gotProgressDN11, gotResultDN11)
+}

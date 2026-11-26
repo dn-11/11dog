@@ -31,7 +31,6 @@ const target = ref('')
 const count = ref(4)
 const intervalMs = ref(300)
 const packetSize = ref(56)
-const ipVersion = ref('auto')
 const timeoutMs = ref(15000)
 const continuousSec = ref(2)
 const continuousMaxRounds = ref(0)
@@ -73,8 +72,7 @@ function buildReq() {
       ping: {
         count: count.value,
         interval_ms: intervalMs.value,
-        packet_size: packetSize.value,
-        ip_version: ipVersion.value
+        packet_size: packetSize.value
       }
     }
   }
@@ -109,7 +107,7 @@ function handleContinuous() {
               v-model="target"
               type="text"
               class="target-input"
-              placeholder="请输入 DN11 域名或 IPv4/IPv6 地址，如 172.16.0.1 或 node.dn11"
+              placeholder="请输入 DN11 域名或 IPv4 地址，如 172.16.0.1 或 node.dn11"
             />
           </div>
 
@@ -157,14 +155,6 @@ function handleContinuous() {
           <label class="form-control">
             包大小(B):
             <input v-model.number="packetSize" type="number" min="16" max="1400" style="width: 78px" />
-          </label>
-          <label class="form-control">
-            IP协议:
-            <select v-model="ipVersion">
-              <option value="auto">自动 (优先v4)</option>
-              <option value="ipv4">仅 IPv4</option>
-              <option value="ipv6">仅 IPv6</option>
-            </select>
           </label>
           <label class="form-control">
             持续总轮数:

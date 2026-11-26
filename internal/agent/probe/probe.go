@@ -105,7 +105,7 @@ func Run(
 		res.Status = status
 		if dnsRes != nil {
 			for _, rec := range dnsRes.Records {
-				if rec.Type == "A" || rec.Type == "AAAA" {
+				if rec.Type == "A" {
 					res.ResolvedIP = rec.Value
 					break
 				}
@@ -144,8 +144,8 @@ func extractHost(target string) string {
 	return strings.Trim(t, "[]")
 }
 
-// resolveHost resolves host into a single netip.Addr respecting ipVersion ("auto", "ipv4", "ipv6").
-func resolveHost(ctx context.Context, target string, ipVersion string) (netip.Addr, error) {
+// resolveHost resolves host into a single IPv4 netip.Addr (DN11 is IPv4-only).
+func resolveHost(ctx context.Context, target string) (netip.Addr, error) {
 	host := extractHost(target)
 	if host == "" {
 		return netip.Addr{}, fmt.Errorf("empty target host")
@@ -153,46 +153,24 @@ func resolveHost(ctx context.Context, target string, ipVersion string) (netip.Ad
 
 	if addr, err := netip.ParseAddr(host); err == nil {
 		addr = addr.Unmap()
-		switch strings.ToLower(ipVersion) {
-		case "ipv4":
-			if !addr.Is4() {
-				return netip.Addr{}, fmt.Errorf("target %s is not IPv4", host)
-			}
-		case "ipv6":
-			if !addr.Is6() {
-				return netip.Addr{}, fmt.Errorf("target %s is not IPv6", host)
-			}
+		if !addr.Is4() {
+			return netip.Addr{}, fmt.Errorf("DN11 暂不支持 IPv6 目标地址: %s", host)
 		}
 		return addr, nil
-	}
-
-	network := "ip"
-	switch strings.ToLower(ipVersion) {
-	case "ipv4":
-		network = "ip4"
-	case "ipv6":
-		network = "ip6"
 	}
 
 	resolveCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	addrs, err := net.DefaultResolver.LookupNetIP(resolveCtx, network, host)
+	addrs, err := net.DefaultResolver.LookupNetIP(resolveCtx, "ip4", host)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("resolve %q: %w", host, err)
 	}
-	if len(addrs) == 0 {
-		return netip.Addr{}, fmt.Errorf("no IP addresses found for %q", host)
-	}
-
-	// In auto mode, prefer IPv4 first if available for predictable dual-stack behavior.
-	if network == "ip" {
-		for _, a := range addrs {
-			u := a.Unmap()
-			if u.Is4() {
-				return u, nil
-			}
+	for _, a := range addrs {
+		u := a.Unmap()
+		if u.Is4() {
+			return u, nil
 		}
 	}
-	return addrs[0].Unmap(), nil
+	return netip.Addr{}, fmt.Errorf("no IPv4 addresses found for %q", host)
 }

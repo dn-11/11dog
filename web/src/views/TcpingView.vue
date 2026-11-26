@@ -31,7 +31,6 @@ const target = ref('')
 const port = ref(80)
 const count = ref(4)
 const intervalMs = ref(300)
-const ipVersion = ref('auto')
 const continuousSec = ref(2)
 const continuousMaxRounds = ref(0)
 const showAdvanced = ref(false)
@@ -71,8 +70,7 @@ function buildReq() {
       tcping: {
         port: port.value,
         count: count.value,
-        interval_ms: intervalMs.value,
-        ip_version: ipVersion.value
+        interval_ms: intervalMs.value
       }
     }
   }
@@ -156,14 +154,6 @@ function handleContinuous() {
           <label class="form-control">
             包间隔(ms):
             <input v-model.number="intervalMs" type="number" min="100" max="5000" style="width: 78px" />
-          </label>
-          <label class="form-control">
-            IP协议:
-            <select v-model="ipVersion">
-              <option value="auto">自动</option>
-              <option value="ipv4">仅 IPv4</option>
-              <option value="ipv6">仅 IPv6</option>
-            </select>
           </label>
           <label class="form-control">
             持续总轮数:

@@ -29,12 +29,12 @@ func TestTargetPolicyWildcardCIDRAndDBPersistence(t *testing.T) {
 		t.Fatalf("disabled policy should allow target, got %v", err)
 	}
 
-	// Configure allow + deny rules with domain wildcards and IPv4/IPv6 CIDRs.
+	// Configure allow + deny rules with domain wildcards and IPv4 CIDRs.
 	updated, err := mgr.Update(ctx, model.TargetPolicy{
 		Enabled: true,
 		AllowRules: []string{
 			"172.16.0.0/16",
-			"fd00::/48",
+			"10.42.0.0/16",
 			"*.dn11.org",
 			"example.com",
 			"node-*.test.net",
@@ -55,8 +55,7 @@ func TestTargetPolicyWildcardCIDRAndDBPersistence(t *testing.T) {
 	allowedCases := []string{
 		"172.16.2.10",
 		"http://172.16.2.10:8080/healthz",
-		"fd00::1234",
-		"[fd00::1234]:443",
+		"10.42.1.5",
 		"a.dn11.org",
 		"a.b.dn11.org",
 		"https://sub.dn11.org:8443/api",
@@ -72,7 +71,6 @@ func TestTargetPolicyWildcardCIDRAndDBPersistence(t *testing.T) {
 	deniedCases := []string{
 		"172.16.1.55",                 // hits deny CIDR overriding allow CIDR
 		"8.8.8.8",                     // outside allow CIDRs
-		"2001:db8::1",                 // outside allow CIDRs
 		"secret.dn11.org",             // hits exact deny domain overriding *.dn11.org
 		"x.blocked.dn11.org",          // hits wildcard deny domain
 		"dn11.org",                    // apex does not match *.dn11.org
@@ -83,6 +81,14 @@ func TestTargetPolicyWildcardCIDRAndDBPersistence(t *testing.T) {
 		if err := mgr.CheckTarget(target); err == nil {
 			t.Errorf("expected target %q to be rejected, but it was allowed", target)
 		}
+	}
+
+	// IPv6 CIDR/IP rules are rejected since DN11 is IPv4-only.
+	if _, err := mgr.Update(ctx, model.TargetPolicy{
+		Enabled:    true,
+		AllowRules: []string{"fd00::/48"},
+	}); err == nil {
+		t.Fatal("expected error for IPv6 CIDR rule")
 	}
 
 	// Verify DB persistence: reloading a fresh manager from the same DB restores rules into memory.

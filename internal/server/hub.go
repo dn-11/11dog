@@ -566,7 +566,6 @@ func (h *Hub) ListNodes() []model.NodeInfo {
 			liveHB = hb
 			info.Status = "online"
 			info.IPv4 = hb.IPv4
-			info.IPv6 = hb.IPv6
 			if len(hb.Capabilities) > 0 {
 				info.Capabilities = hb.Capabilities
 			}

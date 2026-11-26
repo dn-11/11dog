@@ -89,22 +89,13 @@ func resolveDNSServer(override string) string {
 		}
 		return s
 	}
-	if cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf"); err == nil && len(cfg.Servers) > 0 {
-		port := cfg.Port
-		if port == "" {
-			port = "53"
-		}
-		return net.JoinHostPort(cfg.Servers[0], port)
-	}
-	return "223.5.5.5:53"
+	return "172.16.255.53:53"
 }
 
 func extractRRValue(rr dns.RR) string {
 	switch v := rr.(type) {
 	case *dns.A:
 		return v.A.String()
-	case *dns.AAAA:
-		return v.AAAA.String()
 	case *dns.CNAME:
 		return v.Target
 	case *dns.NS:

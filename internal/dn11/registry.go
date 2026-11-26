@@ -100,7 +100,6 @@ func NewRegistry(entries []PrefixEntry) (*Registry, error) {
 func DefaultRegistry() *Registry {
 	r, _ := NewRegistry([]PrefixEntry{
 		{CIDR: "172.16.0.0/16", ASN: 4211110000, Owner: "DN11 Core Backbone", Region: "DN11"},
-		{CIDR: "fd00::/48", ASN: 4211110000, Owner: "DN11 IPv6 Backbone", Region: "DN11"},
 	})
 	return r
 }

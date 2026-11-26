@@ -32,7 +32,6 @@ const method = ref('GET')
 const hostHeader = ref('')
 const followRedirects = ref(true)
 const insecureSkipVerify = ref(true)
-const ipVersion = ref('auto')
 const continuousSec = ref(3)
 const continuousMaxRounds = ref(0)
 const showAdvanced = ref(false)
@@ -73,8 +72,7 @@ function buildReq() {
         method: method.value,
         host_header: hostHeader.value.trim() || undefined,
         follow_redirects: followRedirects.value,
-        insecure_skip_verify: insecureSkipVerify.value,
-        ip_version: ipVersion.value
+        insecure_skip_verify: insecureSkipVerify.value
       }
     }
   }
@@ -165,14 +163,6 @@ function handleContinuous() {
           <label class="form-control">
             <input v-model="insecureSkipVerify" type="checkbox" />
             忽略自签 TLS 证书校验
-          </label>
-          <label class="form-control">
-            IP协议:
-            <select v-model="ipVersion">
-              <option value="auto">自动</option>
-              <option value="ipv4">仅 IPv4</option>
-              <option value="ipv6">仅 IPv6</option>
-            </select>
           </label>
           <label class="form-control">
             持续总轮数:

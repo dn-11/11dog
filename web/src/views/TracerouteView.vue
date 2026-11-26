@@ -13,7 +13,6 @@ const { snapshot, resultsList, running, errorMsg, startSingle, stopAll } = usePr
 const target = ref('')
 const maxHops = ref(30)
 const queriesPerHop = ref(3)
-const ipVersion = ref('auto')
 const selectedNodeIDs = ref<string[]>([])
 const ipFilter = ref('')
 const initializedSelection = ref(false)
@@ -42,8 +41,7 @@ function handleStart() {
       traceroute: {
         max_hops: maxHops.value,
         queries_per_hop: queriesPerHop.value,
-        protocol: 'icmp',
-        ip_version: ipVersion.value
+        protocol: 'icmp'
       }
     }
   })
@@ -68,15 +66,6 @@ function handleStart() {
           <div class="inline-field">
             <label>最大跳数</label>
             <input v-model.number="maxHops" type="number" min="1" max="64" style="width: 52px" />
-          </div>
-
-          <div class="inline-field">
-            <label>IP</label>
-            <select v-model="ipVersion">
-              <option value="auto">自动</option>
-              <option value="ipv4">IPv4</option>
-              <option value="ipv6">IPv6</option>
-            </select>
           </div>
 
           <button v-if="!running" type="submit" class="btn btn-primary" :disabled="!target.trim()">

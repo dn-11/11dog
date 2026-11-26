@@ -14,7 +14,6 @@ import (
 	"github.com/dn-11/11dog/internal/model"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
 func randomID16() int {
@@ -23,31 +22,20 @@ func randomID16() int {
 	return int(binary.BigEndian.Uint16(b[:]))
 }
 
-func openICMPConn(isV6 bool) (conn *icmp.PacketConn, unprivileged bool, err error) {
-	if !isV6 {
-		if c, e := icmp.ListenPacket("ip4:icmp", "0.0.0.0"); e == nil {
-			_ = c.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
-			return c, false, nil
-		} else if cu, eu := icmp.ListenPacket("udp4", "0.0.0.0"); eu == nil {
-			_ = cu.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
-			return cu, true, nil
-		} else {
-			return nil, false, fmt.Errorf("icmp listen failed (raw: %v; udp4: %v)", e, eu)
-		}
-	}
-	if c, e := icmp.ListenPacket("ip6:ipv6-icmp", "::"); e == nil {
-		_ = c.IPv6PacketConn().SetControlMessage(ipv6.FlagHopLimit, true)
+func openICMPConn() (conn *icmp.PacketConn, unprivileged bool, err error) {
+	if c, e := icmp.ListenPacket("ip4:icmp", "0.0.0.0"); e == nil {
+		_ = c.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
 		return c, false, nil
-	} else if cu, eu := icmp.ListenPacket("udp6", "::"); eu == nil {
-		_ = cu.IPv6PacketConn().SetControlMessage(ipv6.FlagHopLimit, true)
+	} else if cu, eu := icmp.ListenPacket("udp4", "0.0.0.0"); eu == nil {
+		_ = cu.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
 		return cu, true, nil
 	} else {
-		return nil, false, fmt.Errorf("icmp6 listen failed (raw: %v; udp6: %v)", e, eu)
+		return nil, false, fmt.Errorf("icmp listen failed (raw: %v; udp4: %v)", e, eu)
 	}
 }
 
 func runPing(ctx context.Context, target string, p model.PingParams, onProgress ProgressFunc) (string, *model.PingResult, model.TaskStatus, error) {
-	addr, err := resolveHost(ctx, target, p.IPVersion)
+	addr, err := resolveHost(ctx, target)
 	if err != nil {
 		return "", nil, model.StatusError, err
 	}
@@ -66,8 +54,7 @@ func runPing(ctx context.Context, target string, p model.PingParams, onProgress 
 		pktSize = 56
 	}
 
-	isV6 := addr.Is6()
-	conn, unprivileged, err := openICMPConn(isV6)
+	conn, unprivileged, err := openICMPConn()
 	if err != nil {
 		return resolvedIP, nil, model.StatusError, err
 	}
@@ -75,20 +62,15 @@ func runPing(ctx context.Context, target string, p model.PingParams, onProgress 
 
 	var dst net.Addr
 	if unprivileged {
-		dst = &net.UDPAddr{IP: addr.AsSlice(), Zone: addr.Zone()}
+		dst = &net.UDPAddr{IP: addr.AsSlice()}
 	} else {
-		dst = &net.IPAddr{IP: addr.AsSlice(), Zone: addr.Zone()}
+		dst = &net.IPAddr{IP: addr.AsSlice()}
 	}
 
 	icmpID := randomID16()
 	var reqType icmp.Type = ipv4.ICMPTypeEcho
 	var replyType icmp.Type = ipv4.ICMPTypeEchoReply
-	protoNum := 1 // ICMPv4
-	if isV6 {
-		reqType = ipv6.ICMPTypeEchoRequest
-		replyType = ipv6.ICMPTypeEchoReply
-		protoNum = 58 // ICMPv6
-	}
+	const protoNum = 1 // ICMPv4
 
 	payload := make([]byte, pktSize)
 	for i := range payload {
@@ -147,17 +129,11 @@ func runPing(ctx context.Context, target string, p model.PingParams, onProgress 
 			var n int
 			var ttl int
 			var peer net.Addr
-			if !isV6 && conn.IPv4PacketConn() != nil {
+			if conn.IPv4PacketConn() != nil {
 				var cm *ipv4.ControlMessage
 				n, cm, peer, err = conn.IPv4PacketConn().ReadFrom(buf)
 				if cm != nil {
 					ttl = cm.TTL
-				}
-			} else if isV6 && conn.IPv6PacketConn() != nil {
-				var cm *ipv6.ControlMessage
-				n, cm, peer, err = conn.IPv6PacketConn().ReadFrom(buf)
-				if cm != nil {
-					ttl = cm.HopLimit
 				}
 			} else {
 				n, peer, err = conn.ReadFrom(buf)

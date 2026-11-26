@@ -163,7 +163,6 @@ function pctWidth(part: number, total: number): string {
             <template v-else-if="probeType === 'dns'">
               <th>RCODE</th>
               <th class="sortable" @click="toggleSort('latency')">查询耗时</th>
-              <th>DNS 服务器</th>
               <th style="min-width: 260px">解析记录</th>
             </template>
           </tr>
@@ -338,7 +337,6 @@ function pctWidth(part: number, total: number): string {
                 </span>
                 <span v-else>-</span>
               </td>
-              <td class="mono text-sm">{{ row.dns?.server_used ?? '-' }}</td>
               <td>
                 <div v-if="row.dns?.records?.length" class="dns-records">
                   <div v-for="(rec, idx) in row.dns.records" :key="idx" class="dns-rec mono">
